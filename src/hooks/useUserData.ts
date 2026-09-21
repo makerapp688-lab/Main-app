@@ -10,33 +10,46 @@ import {
   setThemeMode,
   addToHistory,
   clearHistory,
-  logoutToGuest,
+  logoutFromServer,
   syncWithServerSession
 } from '../utils/userStorage.ts';
 
 export function useUserData() {
   const [account, setAccount] = useState<UserAccount>(() => getCurrentAccount());
   const [userData, setUserData] = useState<UserData>(() => getUserData());
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
 
   useEffect(() => {
+    let mounted = true;
+
     const update = () => {
-      setAccount(getCurrentAccount());
+      const acc = getCurrentAccount();
+      setAccount(acc);
       setUserData(getUserData());
     };
 
-    // Ensure state reflects immediate localStorage account
-    update();
-
-    // Re-verify session in background on app load to refresh server token and prevent silent guest reverts
+    // Synchronize and verify session with backend server on startup
     syncWithServerSession().then((syncedAcc) => {
+      if (!mounted) return;
       if (syncedAcc) {
         setAccount(syncedAcc);
         setUserData(getUserData());
+      } else {
+        const fallback = getCurrentAccount();
+        setAccount(fallback);
+        setUserData(getUserData());
       }
+      setAuthLoading(false);
+    }).catch((err) => {
+      console.warn('[useUserData] Session sync warning:', err);
+      if (mounted) setAuthLoading(false);
     });
 
     const unsubscribe = subscribeUserStorage(update);
-    return () => unsubscribe();
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
   }, []);
 
   const isFavorite = (animeId: string) => userData.favorites.includes(animeId);
@@ -55,6 +68,7 @@ export function useUserData() {
   return {
     account,
     userData,
+    authLoading,
     isFavorite,
     isWatchlist,
     isCompleted,
@@ -64,7 +78,7 @@ export function useUserData() {
     addToHistory,
     clearHistory,
     setTheme: setThemeMode,
-    logout: logoutToGuest,
+    logout: logoutFromServer,
     syncSession: reSyncSession,
     isGuest: account.provider === 'guest'
   };

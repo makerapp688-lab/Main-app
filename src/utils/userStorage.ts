@@ -621,16 +621,26 @@ export function setSessionAccount(account: UserAccount, sessionToken?: string): 
  * Check and synchronize session with backend server with detailed logging and token verification
  */
 export async function syncWithServerSession(): Promise<UserAccount | null> {
-  console.log('[SessionSync] Starting session synchronization on app load...');
+  const hasOwnerCookie = typeof document !== 'undefined' && document.cookie.includes('anivault_owner_session');
+  const hasUserCookie = typeof document !== 'undefined' && document.cookie.includes('anivault_user_session');
+
+  console.log('[SESSION_RESTORE_STARTED]', {
+    hasOwnerCookie,
+    hasUserCookie,
+    hasOwnerTokenHeader: !!localStorage.getItem('anivault_owner_session_token'),
+    hasUserTokenHeader: !!localStorage.getItem('anivault_user_session_token')
+  });
+
   try {
-    // 1. Check Owner session first ONLY if owner token exists
+    // 1. Check Owner session first ONLY if owner token exists or cookie present
     const ownerToken = localStorage.getItem('anivault_owner_session_token');
-    if (ownerToken) {
-      console.log('[SessionSync] Owner session token found in localStorage. Verifying with /api/owner/session...');
-      const ownerHeaders: Record<string, string> = {
-        'Authorization': `Bearer ${ownerToken}`,
-        'x-anivault-owner-session': ownerToken
-      };
+    if (ownerToken || hasOwnerCookie) {
+      console.log('[OWNER_SESSION_CHECK_STARTED]');
+      const ownerHeaders: Record<string, string> = {};
+      if (ownerToken) {
+        ownerHeaders['Authorization'] = `Bearer ${ownerToken}`;
+        ownerHeaders['x-anivault-owner-session'] = ownerToken;
+      }
       const ownerRes = await fetch('/api/owner/session', {
         headers: ownerHeaders,
         credentials: 'include'
@@ -641,8 +651,12 @@ export async function syncWithServerSession(): Promise<UserAccount | null> {
 
       if (ownerRes && ownerRes.ok) {
         const ownerData = await ownerRes.json().catch(() => null);
+        console.log('[OWNER_SESSION_CHECK_RESULT]', {
+          status: ownerRes.status,
+          authenticated: !!(ownerData && ownerData.authenticated)
+        });
         if (ownerData && ownerData.authenticated && ownerData.owner) {
-          console.log(`[SessionSync] Owner session verified successfully for user: "${ownerData.owner.username || 'Owner'}"`);
+          console.log('[SESSION_RESTORE_SUCCESS]', { role: 'owner', id: 'owner_account' });
           const ownerAcc: UserAccount = {
             id: 'owner_account',
             username: ownerData.owner.username || 'Owner',
@@ -653,23 +667,15 @@ export async function syncWithServerSession(): Promise<UserAccount | null> {
           };
           saveSession(ownerAcc);
           return ownerAcc;
-        } else {
-          console.warn('[SessionSync] Owner session endpoint returned unauthenticated response:', ownerData);
         }
       } else if (ownerRes) {
         console.warn(`[SessionSync] Owner session check returned HTTP status ${ownerRes.status}`);
       }
-    } else {
-      console.log('[SessionSync] No owner session token present in localStorage.');
     }
 
     // 2. Check Normal User session
     const token = localStorage.getItem('anivault_user_session_token');
-    if (token) {
-      console.log('[SessionSync] Normal user session token found in localStorage. Verifying with /api/auth/session...');
-    } else {
-      console.log('[SessionSync] Checking user session via cookies with /api/auth/session...');
-    }
+    console.log('[USER_SESSION_CHECK_STARTED]', { hasTokenHeader: !!token, hasCookie: hasUserCookie });
 
     const headers: Record<string, string> = {};
     if (token) {
@@ -687,8 +693,13 @@ export async function syncWithServerSession(): Promise<UserAccount | null> {
 
     if (res && res.ok) {
       const data = await res.json().catch(() => null);
+      console.log('[USER_SESSION_CHECK_RESULT]', {
+        status: res.status,
+        authenticated: !!(data && data.authenticated),
+        provider: data?.user?.provider
+      });
       if (data && data.authenticated && data.user) {
-        console.log(`[SessionSync] User session verified successfully for: "${data.user.username}" (${data.user.id}, provider: ${data.user.provider})`);
+        console.log('[SESSION_RESTORE_SUCCESS]', { role: 'user', id: data.user.id, provider: data.user.provider });
         const serverAcc: UserAccount = {
           id: data.user.id,
           username: data.user.username,
@@ -700,13 +711,10 @@ export async function syncWithServerSession(): Promise<UserAccount | null> {
         if (data.sessionToken) {
           try {
             localStorage.setItem('anivault_user_session_token', data.sessionToken);
-            console.log('[SessionSync] Refreshed session token in localStorage.');
           } catch {}
         }
         saveSession(serverAcc);
         return serverAcc;
-      } else {
-        console.warn('[SessionSync] User session endpoint returned unauthenticated response:', data);
       }
     } else if (res) {
       console.warn(`[SessionSync] User session check returned HTTP status ${res.status}`);
@@ -716,15 +724,14 @@ export async function syncWithServerSession(): Promise<UserAccount | null> {
   }
 
   // 3. Fallback Mechanism: re-verify and restore persisted account state from localStorage
-  console.log('[SessionSync] Server API check completed without active session. Checking local storage fallback...');
   const current = getCurrentAccount();
   if (current && current.id && current.id !== 'guest_user') {
-    console.log(`[SessionSync] Fallback active: Restored persisted account "${current.username}" (${current.id}, provider: ${current.provider})`);
+    console.log('[SESSION_RESTORE_FALLBACK_LOCAL]', { id: current.id, provider: current.provider });
     saveSession(current);
     return current;
   }
 
-  console.log('[SessionSync] No active session found in API or localStorage. Active account remains Guest.');
+  console.log('[GUEST_FALLBACK_REASON]', 'No authenticated server session returned and no persistent local user account found.');
   return null;
 }
 

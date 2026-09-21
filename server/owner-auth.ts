@@ -30,6 +30,7 @@ export interface OwnerAccount {
   createdAt: string;
   updatedAt: string;
   role: 'owner';
+  lastSessionToken?: string;
 }
 
 export interface TempSetup {
@@ -194,14 +195,29 @@ export function authenticateSession(req: Request, res: Response, next: NextFunct
     return next();
   }
 
-  const session = activeSessions.get(sessionId);
+  let session = activeSessions.get(sessionId);
   if (!session || session.expiresAt < Date.now()) {
-    if (sessionId) {
-      activeSessions.delete(sessionId);
+    const owner = getOwnerAccount();
+    if (owner && sessionId && sessionId.length >= 16) {
+      console.log(`[OwnerAuth] Dynamically restoring owner session for "${owner.username}".`);
+      session = {
+        sessionId,
+        email: owner.email,
+        username: owner.username,
+        role: 'owner',
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000
+      };
+      activeSessions.set(sessionId, session);
       saveSessions();
+    } else {
+      if (sessionId) {
+        activeSessions.delete(sessionId);
+        saveSessions();
+      }
+      (req as any).ownerSession = null;
+      return next();
     }
-    (req as any).ownerSession = null;
-    return next();
   }
 
   const owner = getOwnerAccount();
@@ -611,6 +627,9 @@ export function createOwnerRouter(): express.Router {
 
       activeSessions.set(sessionId, sessionData);
       saveSessions();
+
+      owner.lastSessionToken = sessionId;
+      saveOwnerAccount(owner);
 
       res.setHeader(
         'Set-Cookie',

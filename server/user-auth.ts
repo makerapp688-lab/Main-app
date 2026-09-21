@@ -664,6 +664,9 @@ export function createUserAuthRouter() {
       activeUserSessions.set(sessionId, session);
       saveUserSessions();
 
+      (newUser as any).lastSessionToken = sessionId;
+      saveUsers();
+
       res.setHeader(
         'Set-Cookie',
         `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
@@ -821,6 +824,7 @@ export function createUserAuthRouter() {
       saveUserSessions();
 
       user.lastLoginAt = new Date().toISOString();
+      (user as any).lastSessionToken = sessionId;
       saveUsers();
 
       res.setHeader(
@@ -853,11 +857,28 @@ export function createUserAuthRouter() {
       return;
     }
 
-    const session = activeUserSessions.get(sessionId);
+    let session = activeUserSessions.get(sessionId);
     if (!session || session.expiresAt < Date.now()) {
-      if (session) activeUserSessions.delete(sessionId);
-      res.json({ authenticated: false });
-      return;
+      const matchedUser = Object.values(usersCache).find((u: any) => u.lastSessionToken === sessionId);
+      if (matchedUser) {
+        console.log(`[UserAuth] Dynamically restoring user session for "${matchedUser.username}" (${matchedUser.id}).`);
+        session = {
+          sessionId,
+          userId: matchedUser.id,
+          email: matchedUser.email,
+          username: matchedUser.username,
+          provider: matchedUser.provider,
+          role: 'user',
+          createdAt: Date.now(),
+          expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000
+        };
+        activeUserSessions.set(sessionId, session);
+        saveUserSessions();
+      } else {
+        if (session) activeUserSessions.delete(sessionId);
+        res.json({ authenticated: false });
+        return;
+      }
     }
 
     const user = usersCache[session.userId];
@@ -1163,6 +1184,9 @@ export function createUserAuthRouter() {
       activeUserSessions.set(sessionId, session);
       saveUserSessions();
 
+      (user as any).lastSessionToken = sessionId;
+      saveUsers();
+
       res.setHeader(
         'Set-Cookie',
         `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
@@ -1370,6 +1394,9 @@ export function createUserAuthRouter() {
 
       activeUserSessions.set(sessionId, session);
       saveUserSessions();
+
+      (user as any).lastSessionToken = sessionId;
+      saveUsers();
 
       res.setHeader(
         'Set-Cookie',
