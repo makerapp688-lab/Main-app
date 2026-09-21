@@ -1,0 +1,25 @@
+{
+  "short_name": "AniVault",
+  "name": "AniVault - Anime Catalogue & Discovery",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "/icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    },
+    {
+      "src": "/anivault-logo.png",
+      "type": "image/png",
+      "sizes": "1024x1024"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#020617",
+  "theme_color": "#e11d48",
+  "display": "standalone"
+}
