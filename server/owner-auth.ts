@@ -184,7 +184,10 @@ function parseCookies(req: Request): Record<string, string> {
 // Middleware: Authenticate Session
 export function authenticateSession(req: Request, res: Response, next: NextFunction): void {
   const cookies = parseCookies(req);
-  const sessionId = cookies['anivault_owner_session'];
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+  const customHeader = req.headers['x-anivault-owner-session'] as string;
+  const sessionId = cookies['anivault_owner_session'] || bearerToken || customHeader;
 
   if (!sessionId) {
     (req as any).ownerSession = null;
@@ -265,6 +268,12 @@ export function createOwnerRouter(): express.Router {
     }
   });
 
+  // 0c. Public Check for Owner Existence
+  router.get('/exists', (req: Request, res: Response) => {
+    const owner = getOwnerAccount();
+    res.json({ ownerExists: owner !== null });
+  });
+
   // 1. Setup Init (Email, Password, Username)
   router.post('/setup-init', async (req: Request, res: Response) => {
     try {
@@ -305,17 +314,13 @@ export function createOwnerRouter(): express.Router {
       const existingOwner = getOwnerAccount();
 
       if (existingOwner) {
-        if (existingOwner.email !== normalizedEmail) {
-          saveTempSetup(null);
-          res.status(403).json({
-            error: 'Permanent AniVault Owner account already exists. A different email cannot be registered as Owner.',
-            code: 'OWNER_ALREADY_EXISTS'
-          });
-          return;
-        } else {
-          res.status(400).json({ error: 'AniVault Owner account is already set up for this email. Please log in.' });
-          return;
-        }
+        saveTempSetup(null);
+        res.status(403).json({
+          error: 'An Owner account already exists. Only one Owner account is allowed.',
+          code: 'OWNER_ALREADY_EXISTS',
+          ownerExists: true
+        });
+        return;
       }
 
       // Check email service configuration status
@@ -435,7 +440,11 @@ export function createOwnerRouter(): express.Router {
       const existingOwner = getOwnerAccount();
       if (existingOwner) {
         saveTempSetup(null);
-        res.status(403).json({ error: 'Permanent Owner account already exists. Setup rejected.' });
+        res.status(403).json({
+          error: 'An Owner account already exists. Only one Owner account is allowed.',
+          code: 'OWNER_ALREADY_EXISTS',
+          ownerExists: true
+        });
         return;
       }
 
@@ -454,7 +463,7 @@ export function createOwnerRouter(): express.Router {
       saveTempSetup(null);
 
       const sessionId = crypto.randomBytes(32).toString('hex');
-      const sessionExpires = Date.now() + 24 * 60 * 60 * 1000;
+      const sessionExpires = Date.now() + 30 * 24 * 60 * 60 * 1000;
       const sessionData: SessionData = {
         sessionId,
         email: newOwner.email,
@@ -467,16 +476,16 @@ export function createOwnerRouter(): express.Router {
       activeSessions.set(sessionId, sessionData);
       saveSessions();
 
-      const isProd = process.env.NODE_ENV === 'production';
       res.setHeader(
         'Set-Cookie',
-        `anivault_owner_session=${sessionId}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400${isProd ? '; Secure' : ''}`
+        `anivault_owner_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
       );
 
       res.json({
         success: true,
         message: 'Email verified successfully. Permanent Owner account created.',
-        owner: { email: newOwner.email, username: newOwner.username, role: newOwner.role }
+        owner: { email: newOwner.email, username: newOwner.username, role: newOwner.role },
+        sessionToken: sessionId
       });
     } catch (err: any) {
       console.error('[OwnerSetupVerify Error]', err);
@@ -590,7 +599,7 @@ export function createOwnerRouter(): express.Router {
       }
 
       const sessionId = crypto.randomBytes(32).toString('hex');
-      const sessionExpires = Date.now() + 24 * 60 * 60 * 1000;
+      const sessionExpires = Date.now() + 30 * 24 * 60 * 60 * 1000;
       const sessionData: SessionData = {
         sessionId,
         email: owner.email,
@@ -603,16 +612,16 @@ export function createOwnerRouter(): express.Router {
       activeSessions.set(sessionId, sessionData);
       saveSessions();
 
-      const isProd = process.env.NODE_ENV === 'production';
       res.setHeader(
         'Set-Cookie',
-        `anivault_owner_session=${sessionId}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400${isProd ? '; Secure' : ''}`
+        `anivault_owner_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
       );
 
       res.json({
         success: true,
         message: 'Owner login successful.',
-        owner: { email: owner.email, username: owner.username, role: owner.role }
+        owner: { email: owner.email, username: owner.username, role: owner.role },
+        sessionToken: sessionId
       });
     } catch (err: any) {
       console.error('[OwnerLogin Error]', err);
@@ -623,7 +632,10 @@ export function createOwnerRouter(): express.Router {
   // 4. Logout
   router.post('/logout', authenticateSession, (req: Request, res: Response) => {
     const cookies = parseCookies(req);
-    const sessionId = cookies['anivault_owner_session'];
+    const authHeader = req.headers.authorization;
+    const bearerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+    const customHeader = req.headers['x-anivault-owner-session'] as string;
+    const sessionId = cookies['anivault_owner_session'] || bearerToken || customHeader;
 
     if (sessionId) {
       activeSessions.delete(sessionId);
@@ -632,7 +644,7 @@ export function createOwnerRouter(): express.Router {
 
     res.setHeader(
       'Set-Cookie',
-      'anivault_owner_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'
+      'anivault_owner_session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0; Partitioned'
     );
 
     res.json({ success: true, message: 'Logged out successfully.' });

@@ -96,7 +96,7 @@ export interface UserAccount {
   name: string;     // Provider account identity (e.g. Apple ID Name, Google account)
   email?: string;
   avatar?: string;
-  provider: 'guest' | 'google' | 'apple' | 'email';
+  provider: 'guest' | 'google' | 'apple' | 'email' | 'owner';
   createdAt: string;
 }
 

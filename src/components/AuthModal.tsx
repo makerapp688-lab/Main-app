@@ -75,6 +75,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [chosenUsername, setChosenUsername] = useState(currentAccount.username || 'AnimeExplorer');
   
+  // Live username uniqueness validation state
+  const [usernameStatus, setUsernameStatus] = useState<'idle' | 'checking' | 'available' | 'unavailable' | 'invalid'>('idle');
+  const [usernameMessage, setUsernameMessage] = useState<string | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSuccess, setAuthSuccess] = useState<string | null>(null);
@@ -88,6 +92,62 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   } | null>(null);
 
   const [providersStatus, setProvidersStatus] = useState<ProviderStatus | null>(null);
+
+  // Live debounced username uniqueness check with database backend
+  useEffect(() => {
+    if (!isOpen || authMode !== 'register' || registerStep !== 'form') {
+      return;
+    }
+
+    const clean = (chosenUsername || '').trim();
+    if (!clean) {
+      setUsernameStatus('invalid');
+      setUsernameMessage('Username cannot be empty.');
+      return;
+    }
+
+    if (clean.length < 2 || clean.length > 30) {
+      setUsernameStatus('invalid');
+      setUsernameMessage('Username must be 2 to 30 characters.');
+      return;
+    }
+
+    if (!/^[a-zA-Z0-9_-]+$/.test(clean)) {
+      setUsernameStatus('invalid');
+      setUsernameMessage('Only letters, numbers, hyphens, and underscores allowed.');
+      return;
+    }
+
+    setUsernameStatus('checking');
+    setUsernameMessage('Checking availability with database...');
+
+    const timer = setTimeout(async () => {
+      try {
+        const cleanEmail = (emailInput || '').trim().toLowerCase();
+        const res = await fetch(
+          `/api/auth/check-username?username=${encodeURIComponent(clean)}&excludeEmail=${encodeURIComponent(cleanEmail)}`
+        );
+        if (!res.ok) {
+          setUsernameStatus('unavailable');
+          setUsernameMessage('Unable to verify username availability right now.');
+          return;
+        }
+        const data = await res.json();
+        if (data.available) {
+          setUsernameStatus('available');
+          setUsernameMessage('Username is available');
+        } else {
+          setUsernameStatus('unavailable');
+          setUsernameMessage(data.reason || 'Username already taken');
+        }
+      } catch {
+        setUsernameStatus('unavailable');
+        setUsernameMessage('Network error checking username');
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [isOpen, authMode, registerStep, chosenUsername, emailInput]);
 
   useEffect(() => {
     let timer: any;
@@ -161,23 +221,39 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   const handleUpdateUsernameSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chosenUsername.trim()) return;
+    const clean = chosenUsername.trim();
+    if (!clean) return;
 
-    try {
-      const token = localStorage.getItem('anivault_user_session_token');
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
+    setAuthError(null);
 
-      await fetch('/api/auth/update-username', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ username: chosenUsername.trim() })
-      });
-    } catch {
-      // non-fatal
+    if (currentAccount.provider !== 'guest') {
+      try {
+        const token = localStorage.getItem('anivault_user_session_token');
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+          headers['x-anivault-user-session'] = token;
+        }
+
+        const res = await fetch('/api/auth/update-username', {
+          method: 'POST',
+          headers,
+          credentials: 'include',
+          body: JSON.stringify({ username: clean })
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          setAuthError(data.error || 'Failed to update username.');
+          return;
+        }
+      } catch (err: any) {
+        setAuthError(err.message || 'Failed to communicate with server.');
+        return;
+      }
     }
 
-    updateUsername(chosenUsername.trim());
+    updateUsername(clean);
     setActiveView('overview');
     onAccountChanged?.();
   };
@@ -200,6 +276,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     if (!passwordInput || passwordInput.length < 8) {
       setAuthError('Password must be at least 8 characters.');
       return;
+    }
+
+    if (authMode === 'register') {
+      if (usernameStatus !== 'available') {
+        setAuthError(usernameMessage || 'Please choose an available username before registering.');
+        return;
+      }
     }
 
     const cleanUsername = chosenUsername.trim() || cleanEmail.split('@')[0] || 'AnimeExplorer';
@@ -717,20 +800,60 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <form noValidate onSubmit={handleEmailAuthSubmit} className="space-y-3">
                     {authMode === 'register' && (
                       <div>
-                        <label className="block text-[11px] font-semibold text-slate-400 dark:text-slate-400 light:text-slate-600 mb-1">
-                          AniVault Display Username
-                        </label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="block text-[11px] font-semibold text-slate-400 dark:text-slate-400 light:text-slate-600">
+                            AniVault Display Username
+                          </label>
+                          {usernameStatus === 'checking' && (
+                            <span className="text-[10px] text-amber-400 flex items-center gap-1 font-medium">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              <span>Checking database...</span>
+                            </span>
+                          )}
+                          {usernameStatus === 'available' && (
+                            <span className="text-[10px] text-emerald-400 flex items-center gap-1 font-semibold">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                              <span>Username available</span>
+                            </span>
+                          )}
+                          {(usernameStatus === 'unavailable' || usernameStatus === 'invalid') && (
+                            <span className="text-[10px] text-rose-400 flex items-center gap-1 font-semibold">
+                              <AlertCircle className="w-3 h-3 text-rose-400" />
+                              <span>{usernameMessage || 'Unavailable'}</span>
+                            </span>
+                          )}
+                        </div>
                         <div className="relative">
                           <User className="w-4 h-4 text-slate-500 absolute left-3 top-3 pointer-events-none" />
                           <input
                             type="text"
                             id="input-auth-name"
                             value={chosenUsername}
-                            onChange={e => setChosenUsername(e.target.value)}
+                            onChange={e => {
+                              setChosenUsername(e.target.value);
+                              setAuthError(null);
+                            }}
                             placeholder="e.g. AnimeExplorer"
-                            className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950/70 dark:bg-slate-950/70 light:bg-slate-100 border border-slate-700/80 dark:border-slate-700/80 light:border-slate-300 text-xs text-white dark:text-white light:text-slate-900 placeholder-slate-500 focus:outline-none focus:border-rose-500 transition-colors"
+                            className={`w-full pl-9 pr-9 py-2 rounded-xl bg-slate-950/70 dark:bg-slate-950/70 light:bg-slate-100 border text-xs text-white dark:text-white light:text-slate-900 placeholder-slate-500 focus:outline-none transition-colors ${
+                              usernameStatus === 'available'
+                                ? 'border-emerald-500/70 focus:border-emerald-500'
+                                : usernameStatus === 'unavailable' || usernameStatus === 'invalid'
+                                ? 'border-rose-500/80 focus:border-rose-500'
+                                : 'border-slate-700/80 dark:border-slate-700/80 light:border-slate-300 focus:border-rose-500'
+                            }`}
                             required
                           />
+                          <div className="absolute right-3 top-2.5 pointer-events-none">
+                            {usernameStatus === 'checking' && (
+                              <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+                            )}
+                            {usernameStatus === 'available' && (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                            )}
+                            {(usernameStatus === 'unavailable' || usernameStatus === 'invalid') && (
+                              <AlertCircle className="w-4 h-4 text-rose-400" />
+                            )}
+                          </div>
                         </div>
                       </div>
                     )}
@@ -809,18 +932,34 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     <button
                       type="submit"
                       id="btn-auth-submit"
-                      disabled={loading}
-                      className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white shadow-md shadow-rose-600/30 flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                      disabled={loading || (authMode === 'register' && usernameStatus !== 'available')}
+                      className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white shadow-md shadow-rose-600/30 flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {loading ? (
                         <Loader2 className="w-4 h-4 animate-spin" />
                       ) : (
                         <>
-                          <span>{authMode === 'register' ? 'Verify Email' : 'Sign In to Account'}</span>
+                          <span>
+                            {authMode === 'register'
+                              ? usernameStatus === 'checking'
+                                ? 'Checking Username...'
+                                : usernameStatus === 'unavailable'
+                                ? 'Username Unavailable'
+                                : usernameStatus === 'invalid'
+                                ? 'Enter Valid Username'
+                                : 'Send Verification Code'
+                              : 'Sign In to Account'}
+                          </span>
                           <ArrowRight className="w-3.5 h-3.5" />
                         </>
                       )}
                     </button>
+
+                    {loading && authMode === 'register' && (
+                      <p className="text-[11px] text-center text-slate-400 dark:text-slate-400 light:text-slate-500 animate-pulse pt-1">
+                        It may take some time. Please be patient.
+                      </p>
+                    )}
                   </form>
                 </>
               ) : (
@@ -924,6 +1063,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     >
                       {resendCooldown > 0 ? `Resend Code (${resendCooldown}s)` : 'Resend Code'}
                     </button>
+                    {loading && (
+                      <p className="text-[11px] text-center text-slate-400 dark:text-slate-400 light:text-slate-500 animate-pulse">
+                        It may take some time. Please be patient.
+                      </p>
+                    )}
                   </div>
 
                   <div className="text-center pt-1">

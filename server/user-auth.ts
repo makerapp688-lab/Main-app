@@ -73,6 +73,152 @@ let tempVerificationsCache: Record<string, TempUserVerification> = {};
 const activeUserSessions: Map<string, UserSession> = new Map();
 let oauthStatesCache: Record<string, OAuthStateRecord> = {};
 
+export const RESERVED_USERNAMES = new Set([
+  'admin',
+  'administrator',
+  'owner',
+  'anivault',
+  'system',
+  'sysadmin',
+  'support',
+  'moderator',
+  'mod',
+  'root',
+  'official',
+  'staff',
+  'help',
+  'guest',
+  'null',
+  'undefined',
+  'api'
+]);
+
+export function normalizeUsername(username: string): string {
+  return (username || '').trim().toLowerCase();
+}
+
+export function validateUsernameFormat(username: string): { valid: boolean; error?: string } {
+  if (!username || typeof username !== 'string') {
+    return { valid: false, error: 'Username is required.' };
+  }
+  const clean = username.trim();
+  if (clean.length < 2 || clean.length > 30) {
+    return { valid: false, error: 'Username must be between 2 and 30 characters.' };
+  }
+  const regex = /^[a-zA-Z0-9_-]{2,30}$/;
+  if (!regex.test(clean)) {
+    return {
+      valid: false,
+      error: 'Username can only contain letters, numbers, hyphens, and underscores.'
+    };
+  }
+  return { valid: true };
+}
+
+function getOwnerAccount(): { email: string; username: string; role: string } | null {
+  try {
+    if (fs.existsSync(OWNER_ACCOUNT_PATH)) {
+      const data = JSON.parse(fs.readFileSync(OWNER_ACCOUNT_PATH, 'utf-8'));
+      if (data && data.email && data.role === 'owner') {
+        return data;
+      }
+    }
+  } catch (err) {
+    console.error('[UserAuth] Error loading owner account for username uniqueness check:', err);
+  }
+  return null;
+}
+
+export function isUsernameAvailable(
+  rawUsername: string,
+  excludeUserId?: string,
+  excludeEmail?: string
+): { available: boolean; reason?: string } {
+  const formatCheck = validateUsernameFormat(rawUsername);
+  if (!formatCheck.valid) {
+    return { available: false, reason: formatCheck.error };
+  }
+
+  const normalized = normalizeUsername(rawUsername);
+
+  // Check reserved system names
+  if (RESERVED_USERNAMES.has(normalized)) {
+    return { available: false, reason: 'This username is reserved and cannot be used.' };
+  }
+
+  // Check owner username
+  const owner = getOwnerAccount();
+  if (owner && normalizeUsername(owner.username) === normalized) {
+    return { available: false, reason: 'Username already taken.' };
+  }
+
+  // Check existing registered users
+  for (const user of Object.values(usersCache)) {
+    if (excludeUserId && user.id === excludeUserId) {
+      continue;
+    }
+    if (normalizeUsername(user.username) === normalized) {
+      return { available: false, reason: 'Username already taken.' };
+    }
+  }
+
+  // Check active pending verification signups
+  const now = Date.now();
+  for (const [tempEmail, temp] of Object.entries(tempVerificationsCache)) {
+    if (temp.expiresAt > now) {
+      if (excludeEmail && tempEmail.toLowerCase() === excludeEmail.toLowerCase()) {
+        continue;
+      }
+      if (normalizeUsername(temp.username) === normalized) {
+        return { available: false, reason: 'Username already taken.' };
+      }
+    }
+  }
+
+  return { available: true, reason: 'Username available' };
+}
+
+export function generateUniqueUsername(baseName: string): string {
+  let clean = (baseName || 'AniUser').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24);
+  if (clean.length < 2) clean = 'AniUser';
+  let candidate = clean;
+  let counter = 1;
+  while (!isUsernameAvailable(candidate).available) {
+    candidate = `${clean.slice(0, 24)}_${counter}`;
+    counter++;
+  }
+  return candidate;
+}
+
+function auditAndIndexUsernames() {
+  const seen = new Map<string, string>();
+  const conflicts: Array<{ normalized: string; userIds: string[]; usernames: string[] }> = [];
+
+  for (const [id, user] of Object.entries(usersCache)) {
+    if (!user.username) {
+      user.username = (user.email.split('@')[0] || `user_${id.slice(-4)}`).slice(0, 30);
+    }
+    const norm = normalizeUsername(user.username);
+    if (seen.has(norm)) {
+      const existingId = seen.get(norm)!;
+      conflicts.push({
+        normalized: norm,
+        userIds: [existingId, id],
+        usernames: [usersCache[existingId]?.username, user.username]
+      });
+      console.warn(`[UserAuth DB Conflict] Duplicate username detected for key "${norm}": users [${existingId}, ${id}]. Preserving existing accounts.`);
+    } else {
+      seen.set(norm, id);
+    }
+  }
+
+  if (conflicts.length === 0) {
+    console.log(`[UserAuth DB] Username uniqueness index built: ${Object.keys(usersCache).length} user accounts verified unique.`);
+  } else {
+    console.warn(`[UserAuth DB] ${conflicts.length} duplicate username conflicts logged. Existing accounts safely preserved without mutation.`);
+  }
+}
+
 function loadUsersData() {
   try {
     if (fs.existsSync(USERS_ACCOUNTS_PATH)) {
@@ -93,6 +239,7 @@ function loadUsersData() {
     if (fs.existsSync(OAUTH_STATES_PATH)) {
       oauthStatesCache = JSON.parse(fs.readFileSync(OAUTH_STATES_PATH, 'utf-8'));
     }
+    auditAndIndexUsernames();
   } catch (err: any) {
     console.error('[UserAuth DB] Error loading state:', err.message);
   }
@@ -270,26 +417,25 @@ export function createUserAuthRouter() {
     }
   });
 
+  // 1c. Live Username Availability Check
+  router.get('/check-username', (req: Request, res: Response) => {
+    const rawUsername = typeof req.query.username === 'string' ? req.query.username : '';
+    const excludeUserId = typeof req.query.excludeUserId === 'string' ? req.query.excludeUserId : undefined;
+    const excludeEmail = typeof req.query.excludeEmail === 'string' ? req.query.excludeEmail : undefined;
+    const result = isUsernameAvailable(rawUsername, excludeUserId, excludeEmail);
+    res.json({
+      available: result.available,
+      username: rawUsername.trim(),
+      reason: result.reason
+    });
+  });
+
   // 2. Normal User Registration - Step 1: Init with Email, Username, Password
   router.post('/register-init', async (req: Request, res: Response) => {
     try {
       const { email, username, password } = req.body;
 
-      // 1. Username validation: 2-30 characters, letters, numbers, hyphens, underscores
-      if (!username || typeof username !== 'string') {
-        res.status(400).json({ error: 'Username is required.' });
-        return;
-      }
-      const cleanUsername = username.trim();
-      const usernameRegex = /^[a-zA-Z0-9_-]{2,30}$/;
-      if (!usernameRegex.test(cleanUsername)) {
-        res.status(400).json({
-          error: 'Username must be between 2 and 30 characters and can only contain letters, numbers, hyphens, and underscores.'
-        });
-        return;
-      }
-
-      // 2. Email validation: valid normal emails, including Gmail
+      // 1. Email validation: valid normal emails, including Gmail
       if (!email || typeof email !== 'string') {
         res.status(400).json({ error: 'Email address is required.' });
         return;
@@ -298,6 +444,20 @@ export function createUserAuthRouter() {
       const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
       if (!emailRegex.test(normalizedEmail)) {
         res.status(400).json({ error: 'Please enter a valid email address (e.g. user@gmail.com).' });
+        return;
+      }
+
+      // 2. Username uniqueness and format validation
+      if (!username || typeof username !== 'string') {
+        res.status(400).json({ error: 'Username is required.' });
+        return;
+      }
+      const cleanUsername = username.trim();
+      const availCheck = isUsernameAvailable(cleanUsername, undefined, normalizedEmail);
+      if (!availCheck.available) {
+        res.status(400).json({
+          error: availCheck.reason || 'Username already taken.'
+        });
         return;
       }
 
@@ -451,6 +611,17 @@ export function createUserAuthRouter() {
         return;
       }
 
+      // Final check for username availability before committing
+      const finalAvailCheck = isUsernameAvailable(tempRec.username);
+      if (!finalAvailCheck.available) {
+        delete tempVerificationsCache[normalizedEmail];
+        saveTempVerifications();
+        res.status(409).json({
+          error: 'Username was claimed during the verification window. Please register again with a new username.'
+        });
+        return;
+      }
+
       // Code is valid! Create permanent verified normal user account
       const userId = `usr_${crypto.randomBytes(8).toString('hex')}`;
       const isoNow = new Date().toISOString();
@@ -495,7 +666,7 @@ export function createUserAuthRouter() {
 
       res.setHeader(
         'Set-Cookie',
-        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000`
+        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
       );
 
       res.json({
@@ -654,7 +825,7 @@ export function createUserAuthRouter() {
 
       res.setHeader(
         'Set-Cookie',
-        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000`
+        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
       );
 
       res.json({
@@ -674,7 +845,8 @@ export function createUserAuthRouter() {
     const cookies = parseCookies(req);
     const authHeader = req.headers.authorization;
     const bearerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
-    const sessionId = cookies.anivault_user_session || bearerToken;
+    const customHeader = req.headers['x-anivault-user-session'] as string;
+    const sessionId = cookies.anivault_user_session || bearerToken || customHeader;
 
     if (!sessionId) {
       res.json({ authenticated: false });
@@ -706,7 +878,8 @@ export function createUserAuthRouter() {
     const cookies = parseCookies(req);
     const authHeader = req.headers.authorization;
     const bearerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
-    const sessionId = cookies.anivault_user_session || bearerToken;
+    const customHeader = req.headers['x-anivault-user-session'] as string;
+    const sessionId = cookies.anivault_user_session || bearerToken || customHeader;
 
     if (sessionId) {
       activeUserSessions.delete(sessionId);
@@ -715,7 +888,7 @@ export function createUserAuthRouter() {
 
     res.setHeader(
       'Set-Cookie',
-      'anivault_user_session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0'
+      'anivault_user_session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0; Partitioned'
     );
 
     res.json({ success: true, message: 'Logged out successfully.' });
@@ -726,7 +899,8 @@ export function createUserAuthRouter() {
     const cookies = parseCookies(req);
     const authHeader = req.headers.authorization;
     const bearerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
-    const sessionId = cookies.anivault_user_session || bearerToken;
+    const customHeader = req.headers['x-anivault-user-session'] as string;
+    const sessionId = cookies.anivault_user_session || bearerToken || customHeader;
 
     if (!sessionId) {
       res.status(401).json({ error: 'Unauthorized.' });
@@ -746,15 +920,15 @@ export function createUserAuthRouter() {
     }
 
     const { username } = req.body;
-    if (!username || typeof username !== 'string' || username.trim().length < 2) {
-      res.status(400).json({ error: 'Username must be at least 2 characters.' });
+    if (!username || typeof username !== 'string') {
+      res.status(400).json({ error: 'Username is required.' });
       return;
     }
 
-    const cleanUsername = username.trim().slice(0, 30);
-    // Disallow pretending to be Owner
-    if (cleanUsername.toLowerCase().includes('owner') || cleanUsername.toLowerCase().includes('admin')) {
-      res.status(400).json({ error: 'Restricted username prefix.' });
+    const cleanUsername = username.trim();
+    const availCheck = isUsernameAvailable(cleanUsername, user.id, user.email);
+    if (!availCheck.available) {
+      res.status(400).json({ error: availCheck.reason || 'Username already taken.' });
       return;
     }
 
@@ -951,12 +1125,13 @@ export function createUserAuthRouter() {
         user.lastLoginAt = isoNow;
         user.updatedAt = isoNow;
       } else {
-        // Create new verified normal user
+        // Create new verified normal user with guaranteed unique username
         const newId = `usr_${crypto.randomBytes(8).toString('hex')}`;
+        const uniqueUsername = generateUniqueUsername(googleName || 'GoogleUser');
         user = {
           id: newId,
           email: googleEmail,
-          username: googleName.slice(0, 30),
+          username: uniqueUsername,
           name: googleName,
           provider: 'google',
           googleId: googleSub,
@@ -990,7 +1165,7 @@ export function createUserAuthRouter() {
 
       res.setHeader(
         'Set-Cookie',
-        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000`
+        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
       );
 
       return renderHtmlResponse(true, { user: sanitizeUser(user), sessionToken: sessionId });
@@ -1161,10 +1336,11 @@ export function createUserAuthRouter() {
         user.updatedAt = isoNow;
       } else {
         const newId = `usr_${crypto.randomBytes(8).toString('hex')}`;
+        const uniqueUsername = generateUniqueUsername(parsedName || 'AppleUser');
         user = {
           id: newId,
           email: appleEmail,
-          username: parsedName.slice(0, 30),
+          username: uniqueUsername,
           name: parsedName,
           provider: 'apple',
           appleId: appleSub,
@@ -1197,7 +1373,7 @@ export function createUserAuthRouter() {
 
       res.setHeader(
         'Set-Cookie',
-        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000`
+        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
       );
 
       return renderHtmlResponse(true, { user: sanitizeUser(user), sessionToken: sessionId });

@@ -1,8 +1,6 @@
 import { UserAccount, UserData, ThemeMode } from '../types.ts';
 
 export interface StoredAccountRecord extends UserAccount {
-  passwordHash?: string;
-  salt?: string;
   lastLoginAt: string;
 }
 
@@ -80,7 +78,24 @@ function saveAccountsDb(db: Record<string, StoredAccountRecord>): void {
  */
 export function getCurrentAccount(): UserAccount {
   try {
-    // 1. Check current session token/accountId
+    // 1. Check primary current account key
+    const raw = localStorage.getItem(STORAGE_KEYS.CURRENT_ACCOUNT);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.id && parsed.id !== 'guest_user') {
+        return {
+          id: parsed.id,
+          username: parsed.username || parsed.name || 'AnimeExplorer',
+          name: parsed.name || parsed.username || 'AnimeExplorer',
+          email: parsed.email,
+          avatar: parsed.avatar,
+          provider: parsed.provider,
+          createdAt: parsed.createdAt || new Date().toISOString()
+        };
+      }
+    }
+
+    // 2. Check session token / accountId in accounts db
     const sessionRaw = localStorage.getItem(STORAGE_KEYS.CURRENT_SESSION);
     if (sessionRaw) {
       const session = JSON.parse(sessionRaw);
@@ -91,7 +106,7 @@ export function getCurrentAccount(): UserAccount {
           return {
             id: rec.id,
             username: rec.username || rec.name || 'AnimeExplorer',
-            name: rec.name,
+            name: rec.name || rec.username,
             email: rec.email,
             avatar: rec.avatar,
             provider: rec.provider,
@@ -101,15 +116,36 @@ export function getCurrentAccount(): UserAccount {
       }
     }
 
-    // 2. Check legacy current account key
-    const raw = localStorage.getItem(STORAGE_KEYS.CURRENT_ACCOUNT);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.id && parsed.id !== 'guest_user') {
-        if (!parsed.username) {
-          parsed.username = parsed.name || 'AnimeExplorer';
-        }
-        return parsed;
+    // 3. Check if owner token exists in localStorage
+    const ownerToken = localStorage.getItem('anivault_owner_session_token');
+    if (ownerToken) {
+      const db = getAccountsDb();
+      if (db['owner_account']) {
+        const rec = db['owner_account'];
+        return {
+          id: 'owner_account',
+          username: rec.username || 'Owner',
+          name: rec.name || rec.username || 'Owner',
+          email: rec.email,
+          provider: 'owner',
+          createdAt: rec.createdAt || new Date().toISOString()
+        };
+      }
+      return {
+        id: 'owner_account',
+        username: 'Owner',
+        name: 'Owner',
+        provider: 'owner',
+        createdAt: new Date().toISOString()
+      };
+    }
+
+    // 4. Check if normal user token exists in localStorage
+    const userToken = localStorage.getItem('anivault_user_session_token');
+    if (userToken) {
+      const savedList = getSavedAccounts().filter(a => a.id !== 'guest_user');
+      if (savedList.length > 0) {
+        return savedList[savedList.length - 1];
       }
     }
   } catch (err) {
@@ -365,11 +401,6 @@ export function authenticateWithEmail(
   const existing = db[id];
 
   if (existing) {
-    // If account exists and password was set, verify password
-    if (existing.passwordHash && password && existing.passwordHash !== password) {
-      return { success: false, error: 'Incorrect password for this account.' };
-    }
-
     // Update username if explicitly changed
     if (customUsername?.trim()) {
       existing.username = customUsername.trim();
@@ -398,7 +429,6 @@ export function authenticateWithEmail(
     username: defaultUsername,
     name: cleanEmail.split('@')[0],
     email: cleanEmail,
-    passwordHash: password || undefined,
     provider: 'email',
     createdAt: new Date().toISOString(),
     lastLoginAt: new Date().toISOString()
@@ -473,6 +503,22 @@ export function authenticateWithProvider(
  */
 function saveSession(account: UserAccount) {
   try {
+    // 1. Ensure account is stored in ACCOUNTS_DB with its stable internal ID
+    if (account.id && account.id !== 'guest_user') {
+      const db = getAccountsDb();
+      db[account.id] = {
+        id: account.id,
+        username: account.username || account.name || 'AnimeExplorer',
+        name: account.name || account.username || 'AnimeExplorer',
+        email: account.email,
+        avatar: account.avatar,
+        provider: account.provider,
+        createdAt: account.createdAt || new Date().toISOString(),
+        lastLoginAt: new Date().toISOString()
+      };
+      saveAccountsDb(db);
+    }
+
     localStorage.setItem(
       STORAGE_KEYS.CURRENT_SESSION,
       JSON.stringify({
@@ -534,6 +580,8 @@ export function switchAccount(account: UserAccount): void {
  */
 export function logoutToGuest(): void {
   try {
+    localStorage.removeItem('anivault_owner_session_token');
+    localStorage.removeItem('anivault_user_session_token');
     localStorage.setItem(
       STORAGE_KEYS.CURRENT_SESSION,
       JSON.stringify({
@@ -552,29 +600,95 @@ export function logoutToGuest(): void {
  * Set active session from server verified account
  */
 export function setSessionAccount(account: UserAccount, sessionToken?: string): void {
+  console.log(`[SessionSync] Setting active session account for "${account.username}" (${account.id}, provider: ${account.provider})`);
   if (sessionToken) {
     try {
-      localStorage.setItem('anivault_user_session_token', sessionToken);
-    } catch {}
+      if (account.provider === 'owner') {
+        localStorage.setItem('anivault_owner_session_token', sessionToken);
+        console.log('[SessionSync] Stored owner session token in localStorage.');
+      } else {
+        localStorage.setItem('anivault_user_session_token', sessionToken);
+        console.log('[SessionSync] Stored user session token in localStorage.');
+      }
+    } catch (err) {
+      console.warn('[SessionSync] Failed to store session token:', err);
+    }
   }
   saveSession(account);
 }
 
 /**
- * Check and synchronize session with backend server
+ * Check and synchronize session with backend server with detailed logging and token verification
  */
 export async function syncWithServerSession(): Promise<UserAccount | null> {
+  console.log('[SessionSync] Starting session synchronization on app load...');
   try {
+    // 1. Check Owner session first ONLY if owner token exists
+    const ownerToken = localStorage.getItem('anivault_owner_session_token');
+    if (ownerToken) {
+      console.log('[SessionSync] Owner session token found in localStorage. Verifying with /api/owner/session...');
+      const ownerHeaders: Record<string, string> = {
+        'Authorization': `Bearer ${ownerToken}`,
+        'x-anivault-owner-session': ownerToken
+      };
+      const ownerRes = await fetch('/api/owner/session', {
+        headers: ownerHeaders,
+        credentials: 'include'
+      }).catch((err) => {
+        console.warn('[SessionSync] Network error while reaching /api/owner/session:', err);
+        return null;
+      });
+
+      if (ownerRes && ownerRes.ok) {
+        const ownerData = await ownerRes.json().catch(() => null);
+        if (ownerData && ownerData.authenticated && ownerData.owner) {
+          console.log(`[SessionSync] Owner session verified successfully for user: "${ownerData.owner.username || 'Owner'}"`);
+          const ownerAcc: UserAccount = {
+            id: 'owner_account',
+            username: ownerData.owner.username || 'Owner',
+            name: ownerData.owner.username || 'Owner',
+            email: ownerData.owner.email,
+            provider: 'owner',
+            createdAt: new Date().toISOString()
+          };
+          saveSession(ownerAcc);
+          return ownerAcc;
+        } else {
+          console.warn('[SessionSync] Owner session endpoint returned unauthenticated response:', ownerData);
+        }
+      } else if (ownerRes) {
+        console.warn(`[SessionSync] Owner session check returned HTTP status ${ownerRes.status}`);
+      }
+    } else {
+      console.log('[SessionSync] No owner session token present in localStorage.');
+    }
+
+    // 2. Check Normal User session
     const token = localStorage.getItem('anivault_user_session_token');
+    if (token) {
+      console.log('[SessionSync] Normal user session token found in localStorage. Verifying with /api/auth/session...');
+    } else {
+      console.log('[SessionSync] Checking user session via cookies with /api/auth/session...');
+    }
+
     const headers: Record<string, string> = {};
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
+      headers['x-anivault-user-session'] = token;
     }
 
-    const res = await fetch('/api/auth/session', { headers });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.authenticated && data.user) {
+    const res = await fetch('/api/auth/session', {
+      headers,
+      credentials: 'include'
+    }).catch((err) => {
+      console.warn('[SessionSync] Network error while reaching /api/auth/session:', err);
+      return null;
+    });
+
+    if (res && res.ok) {
+      const data = await res.json().catch(() => null);
+      if (data && data.authenticated && data.user) {
+        console.log(`[SessionSync] User session verified successfully for: "${data.user.username}" (${data.user.id}, provider: ${data.user.provider})`);
         const serverAcc: UserAccount = {
           id: data.user.id,
           username: data.user.username,
@@ -583,13 +697,34 @@ export async function syncWithServerSession(): Promise<UserAccount | null> {
           provider: data.user.provider,
           createdAt: data.user.createdAt
         };
+        if (data.sessionToken) {
+          try {
+            localStorage.setItem('anivault_user_session_token', data.sessionToken);
+            console.log('[SessionSync] Refreshed session token in localStorage.');
+          } catch {}
+        }
         saveSession(serverAcc);
         return serverAcc;
+      } else {
+        console.warn('[SessionSync] User session endpoint returned unauthenticated response:', data);
       }
+    } else if (res) {
+      console.warn(`[SessionSync] User session check returned HTTP status ${res.status}`);
     }
   } catch (err) {
-    console.warn('Failed to sync server session:', err);
+    console.error('[SessionSync] Exception during session synchronization:', err);
   }
+
+  // 3. Fallback Mechanism: re-verify and restore persisted account state from localStorage
+  console.log('[SessionSync] Server API check completed without active session. Checking local storage fallback...');
+  const current = getCurrentAccount();
+  if (current && current.id && current.id !== 'guest_user') {
+    console.log(`[SessionSync] Fallback active: Restored persisted account "${current.username}" (${current.id}, provider: ${current.provider})`);
+    saveSession(current);
+    return current;
+  }
+
+  console.log('[SessionSync] No active session found in API or localStorage. Active account remains Guest.');
   return null;
 }
 
@@ -598,13 +733,31 @@ export async function syncWithServerSession(): Promise<UserAccount | null> {
  */
 export async function logoutFromServer(): Promise<void> {
   try {
-    const token = localStorage.getItem('anivault_user_session_token');
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+    const ownerToken = localStorage.getItem('anivault_owner_session_token');
+    if (ownerToken) {
+      await fetch('/api/owner/logout', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${ownerToken}`,
+          'x-anivault-owner-session': ownerToken
+        },
+        credentials: 'include'
+      }).catch(() => {});
+      localStorage.removeItem('anivault_owner_session_token');
     }
-    await fetch('/api/auth/logout', { method: 'POST', headers });
-    localStorage.removeItem('anivault_user_session_token');
+
+    const token = localStorage.getItem('anivault_user_session_token');
+    if (token) {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'x-anivault-user-session': token
+        },
+        credentials: 'include'
+      }).catch(() => {});
+      localStorage.removeItem('anivault_user_session_token');
+    }
   } catch (err) {
     console.warn('Error during server logout:', err);
   }

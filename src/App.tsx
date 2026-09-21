@@ -38,7 +38,7 @@ import {
   resolveWatchUrl
 } from './utils/provider.ts';
 import { useUserData } from './hooks/useUserData.ts';
-import { applyThemeClass } from './utils/userStorage.ts';
+import { applyThemeClass, syncWithServerSession } from './utils/userStorage.ts';
 
 // Static fallback bundle
 import fallbackCatalogue from './data/anivault-catalogue.json';
@@ -85,6 +85,11 @@ export function App() {
   useEffect(() => {
     applyThemeClass(userData.theme);
   }, [userData.theme]);
+
+  // Restore and synchronize authenticated session with server on startup
+  useEffect(() => {
+    syncWithServerSession();
+  }, []);
 
   // Fetch from backend API
   const fetchCatalogue = async () => {

@@ -25,6 +25,11 @@ html.light, html.light body {
 
 html, body {
   min-height: 100%;
+  -webkit-overflow-scrolling: touch;
+}
+
+body {
+  overflow-x: hidden;
 }
 
 /* Custom subtle scrollbar */
