@@ -5,7 +5,8 @@ import crypto from 'crypto';
 import {
   getEmailConfigStatus,
   generateVerificationCode,
-  sendVerificationEmail
+  sendVerificationEmail,
+  testEmailTransport
 } from './email-service.js';
 
 const DATA_DIR = path.join(process.cwd(), 'server', 'data');
@@ -193,19 +194,6 @@ function sanitizeUser(u: UserRecord) {
   };
 }
 
-// Check owner email collision
-function isOwnerEmail(email: string): boolean {
-  try {
-    if (fs.existsSync(OWNER_ACCOUNT_PATH)) {
-      const owner = JSON.parse(fs.readFileSync(OWNER_ACCOUNT_PATH, 'utf-8'));
-      if (owner?.email && owner.email.toLowerCase() === email.toLowerCase()) {
-        return true;
-      }
-    }
-  } catch {}
-  return false;
-}
-
 export function getGoogleConfigStatus(): { configured: boolean; missing: string[] } {
   const missing: string[] = [];
   if (!process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID.trim() === '') {
@@ -265,6 +253,23 @@ export function createUserAuthRouter() {
     });
   });
 
+  // 1b. Controlled Email Transport Diagnostic Test
+  router.get('/email-diagnostic', async (req: Request, res: Response) => {
+    try {
+      const emailStatus = getEmailConfigStatus();
+      const testRecipient = typeof req.query.to === 'string' ? req.query.to.trim() : undefined;
+      const result = await testEmailTransport(testRecipient);
+
+      res.status(result.success ? 200 : 503).json({
+        configured: emailStatus.configured,
+        missing: emailStatus.missing,
+        diagnostic: result
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // 2. Normal User Registration - Step 1: Init with Email, Username, Password
   router.post('/register-init', async (req: Request, res: Response) => {
     try {
@@ -302,14 +307,6 @@ export function createUserAuthRouter() {
         return;
       }
 
-      // Check if email belongs to Owner account
-      if (isOwnerEmail(normalizedEmail)) {
-        res.status(400).json({
-          error: 'This email is reserved for AniVault system operations. Please use the Owner portal or a different email address.'
-        });
-        return;
-      }
-
       // Check if verified account already exists for this email
       const existingUser = Object.values(usersCache).find(u => u.email === normalizedEmail && u.isVerified);
       if (existingUser) {
@@ -323,9 +320,8 @@ export function createUserAuthRouter() {
       const emailStatus = getEmailConfigStatus();
       if (!emailStatus.configured) {
         res.status(503).json({
-          error: 'Email service is not configured correctly.',
-          code: 'EMAIL_NOT_CONFIGURED',
-          missing: emailStatus.missing
+          error: 'Email verification is temporarily unavailable. Please try again later.',
+          code: 'EMAIL_UNAVAILABLE'
         });
         return;
       }
@@ -346,6 +342,8 @@ export function createUserAuthRouter() {
 
       // Generate cryptographically secure 6-digit code
       const { code, codeHash } = generateVerificationCode();
+      const recipientDomain = normalizedEmail.includes('@') ? '@' + normalizedEmail.split('@')[1] : 'recipient';
+      console.log(`[EMAIL_DIAGNOSTIC] OTP_GENERATED: true, length=6, domain=${recipientDomain}`);
       const { hash: passwordHash, salt } = hashPassword(password);
 
       const tempRec: TempUserVerification = {
@@ -362,6 +360,7 @@ export function createUserAuthRouter() {
 
       tempVerificationsCache[normalizedEmail] = tempRec;
       saveTempVerifications();
+      console.log(`[EMAIL_DIAGNOSTIC] OTP_STORAGE_SUCCESS: true, domain=${recipientDomain}, expiresAt=+10m`);
 
       // Dispatch real email via configured SMTP
       try {
@@ -374,8 +373,9 @@ export function createUserAuthRouter() {
         console.error('[UserRegisterInit] Failed to send email:', mailErr.message);
         delete tempVerificationsCache[normalizedEmail];
         saveTempVerifications();
+        const safeError = mailErr.message || 'Email delivery failed.';
         res.status(503).json({
-          error: mailErr.message || 'Failed to deliver verification email. Please check email service configuration.',
+          error: safeError,
           code: 'EMAIL_SEND_FAILED'
         });
         return;
@@ -531,9 +531,8 @@ export function createUserAuthRouter() {
       const emailStatus = getEmailConfigStatus();
       if (!emailStatus.configured) {
         res.status(503).json({
-          error: 'Email service is not configured correctly.',
-          code: 'EMAIL_NOT_CONFIGURED',
-          missing: emailStatus.missing
+          error: 'Email verification is temporarily unavailable. Please try again later.',
+          code: 'EMAIL_UNAVAILABLE'
         });
         return;
       }
@@ -556,12 +555,15 @@ export function createUserAuthRouter() {
       }
 
       const { code, codeHash } = generateVerificationCode();
+      const recipientDomain = normalizedEmail.includes('@') ? '@' + normalizedEmail.split('@')[1] : 'recipient';
+      console.log(`[EMAIL_DIAGNOSTIC] OTP_GENERATED: true, length=6, domain=${recipientDomain} (RESEND)`);
       tempRec.codeHash = codeHash;
       tempRec.expiresAt = now + 10 * 60 * 1000;
       tempRec.attempts = 0;
       tempRec.resendCount += 1;
       tempRec.lastResendAt = now;
       saveTempVerifications();
+      console.log(`[EMAIL_DIAGNOSTIC] OTP_STORAGE_SUCCESS: true, domain=${recipientDomain}, resendCount=${tempRec.resendCount}`);
 
       try {
         await sendVerificationEmail(
@@ -571,8 +573,9 @@ export function createUserAuthRouter() {
         );
       } catch (mailErr: any) {
         console.error('[UserResendCode] Failed to send email:', mailErr.message);
+        const safeError = mailErr.message || 'Email delivery failed.';
         res.status(503).json({
-          error: mailErr.message || 'Failed to deliver verification email. Please check email service configuration.',
+          error: safeError,
           code: 'EMAIL_SEND_FAILED'
         });
         return;
@@ -933,13 +936,6 @@ export function createUserAuthRouter() {
         return renderHtmlResponse(false, { error: 'Google did not provide a valid email address.' });
       }
 
-      // Check if user is Owner
-      if (isOwnerEmail(googleEmail)) {
-        return renderHtmlResponse(false, {
-          error: 'This email is reserved for Owner access. Please log in via the Owner portal.'
-        });
-      }
-
       // Find existing user by googleId or verified email
       let user = Object.values(usersCache).find(
         u => (u.googleId && u.googleId === googleSub) || (u.email === googleEmail && u.isVerified)
@@ -1148,13 +1144,6 @@ export function createUserAuthRouter() {
       if (!appleEmail) {
         // If Apple private relay or email not in claim, generate identity email
         appleEmail = `${appleSub.slice(0, 12)}@privaterelay.appleid.com`;
-      }
-
-      // Check if user is Owner
-      if (isOwnerEmail(appleEmail)) {
-        return renderHtmlResponse(false, {
-          error: 'This email is reserved for Owner access. Please log in via the Owner portal.'
-        });
       }
 
       // Find existing user by appleId or verified email

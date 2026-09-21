@@ -5,7 +5,8 @@ import crypto from 'crypto';
 import {
   getEmailConfigStatus,
   generateVerificationCode,
-  sendVerificationEmail
+  sendVerificationEmail,
+  testEmailTransport
 } from './email-service.js';
 
 // Data file paths
@@ -239,6 +240,31 @@ export function requireOwner(req: Request, res: Response, next: NextFunction): v
 export function createOwnerRouter(): express.Router {
   const router = express.Router();
 
+  // 0a. Owner-Only Email Service Configuration Status (No secret values returned)
+  router.get('/email-status', (req: Request, res: Response) => {
+    const status = getEmailConfigStatus();
+    res.json({
+      configured: status.configured,
+      missing: status.missing,
+      hostConfigured: status.hostConfigured,
+      userConfigured: status.userConfigured,
+      passConfigured: status.passConfigured,
+      fromConfigured: status.fromConfigured
+    });
+  });
+
+  // 0b. Owner-Only Real Email Transport Diagnostic Test
+  router.post('/email-test', async (req: Request, res: Response) => {
+    try {
+      const { recipient } = req.body;
+      const testRecipient = typeof recipient === 'string' && recipient.trim() ? recipient.trim() : undefined;
+      const result = await testEmailTransport(testRecipient);
+      res.status(result.success ? 200 : 503).json(result);
+    } catch (err: any) {
+      res.status(500).json({ success: false, step: 'SERVER_ERROR', error: err.message });
+    }
+  });
+
   // 1. Setup Init (Email, Password, Username)
   router.post('/setup-init', async (req: Request, res: Response) => {
     try {
@@ -296,9 +322,13 @@ export function createOwnerRouter(): express.Router {
       const emailStatus = getEmailConfigStatus();
       if (!emailStatus.configured) {
         res.status(503).json({
-          error: 'Email service is not configured correctly.',
+          error: 'Email service is not configured. Please configure SMTP_HOST, SMTP_USER, and SMTP_PASS in server environment secrets.',
           code: 'EMAIL_NOT_CONFIGURED',
-          missing: emailStatus.missing
+          missing: emailStatus.missing,
+          hostConfigured: emailStatus.hostConfigured,
+          userConfigured: emailStatus.userConfigured,
+          passConfigured: emailStatus.passConfigured,
+          fromConfigured: emailStatus.fromConfigured
         });
         return;
       }
@@ -318,6 +348,8 @@ export function createOwnerRouter(): express.Router {
 
       const { hash: passwordHash, salt } = hashPassword(password);
       const { code, codeHash } = generateVerificationCode();
+      const recipientDomain = normalizedEmail.includes('@') ? '@' + normalizedEmail.split('@')[1] : 'recipient';
+      console.log(`[EMAIL_DIAGNOSTIC] OTP_GENERATED: true, length=6, domain=${recipientDomain} (OWNER_SETUP)`);
 
       const tempSetup: TempSetup = {
         email: normalizedEmail,
@@ -332,14 +364,16 @@ export function createOwnerRouter(): express.Router {
       };
 
       saveTempSetup(tempSetup);
+      console.log(`[EMAIL_DIAGNOSTIC] OTP_STORAGE_SUCCESS: true, domain=${recipientDomain}, expiresAt=+10m (OWNER_SETUP)`);
 
       try {
         await sendVerificationEmail(normalizedEmail, code, 'Verify your AniVault account');
       } catch (mailErr: any) {
         console.error('[OwnerSetupInit] Failed to send email:', mailErr.message);
         saveTempSetup(null);
+        const safeError = mailErr.message || 'Email delivery failed.';
         res.status(503).json({
-          error: mailErr.message || 'Failed to deliver verification email. Please check email service configuration.',
+          error: safeError,
           code: 'EMAIL_SEND_FAILED'
         });
         return;
@@ -467,9 +501,13 @@ export function createOwnerRouter(): express.Router {
       const emailStatus = getEmailConfigStatus();
       if (!emailStatus.configured) {
         res.status(503).json({
-          error: 'Email service is not configured correctly.',
+          error: 'Email service is not configured. Please configure SMTP_HOST, SMTP_USER, and SMTP_PASS in server environment secrets.',
           code: 'EMAIL_NOT_CONFIGURED',
-          missing: emailStatus.missing
+          missing: emailStatus.missing,
+          hostConfigured: emailStatus.hostConfigured,
+          userConfigured: emailStatus.userConfigured,
+          passConfigured: emailStatus.passConfigured,
+          fromConfigured: emailStatus.fromConfigured
         });
         return;
       }
@@ -493,12 +531,15 @@ export function createOwnerRouter(): express.Router {
 
       // Invalidate previous OTP and generate a new secure 6-digit OTP
       const { code, codeHash } = generateVerificationCode();
+      const recipientDomain = normalizedEmail.includes('@') ? '@' + normalizedEmail.split('@')[1] : 'recipient';
+      console.log(`[EMAIL_DIAGNOSTIC] OTP_GENERATED: true, length=6, domain=${recipientDomain} (OWNER_RESEND)`);
       tempSetup.codeHash = codeHash;
       tempSetup.expiresAt = now + 10 * 60 * 1000;
       tempSetup.attempts = 0;
       tempSetup.resendCount += 1;
       tempSetup.lastResendAt = now;
       saveTempSetup(tempSetup);
+      console.log(`[EMAIL_DIAGNOSTIC] OTP_STORAGE_SUCCESS: true, domain=${recipientDomain}, resendCount=${tempSetup.resendCount} (OWNER_RESEND)`);
 
       try {
         await sendVerificationEmail(
@@ -508,8 +549,9 @@ export function createOwnerRouter(): express.Router {
         );
       } catch (mailErr: any) {
         console.error('[OwnerSetupResend] Failed to send email:', mailErr.message);
+        const safeError = mailErr.message || 'Email delivery failed.';
         res.status(503).json({
-          error: mailErr.message || 'Failed to deliver verification email. Please check email service configuration.',
+          error: safeError,
           code: 'EMAIL_SEND_FAILED'
         });
         return;
@@ -675,6 +717,7 @@ export function createOwnerRouter(): express.Router {
       }
 
       const { code, codeHash } = generateVerificationCode();
+      console.log(`[EMAIL_DIAGNOSTIC] OTP_GENERATED: true, length=6, recipient=${normalizedNewEmail} (OWNER_EMAIL_CHANGE)`);
 
       const emailChange: TempEmailChange = {
         ownerEmail: owner.email,
@@ -685,7 +728,19 @@ export function createOwnerRouter(): express.Router {
       };
 
       saveTempEmailChange(emailChange);
-      await sendVerificationEmail(normalizedNewEmail, code, 'Verify your AniVault account');
+      console.log(`[EMAIL_DIAGNOSTIC] OTP_STORAGE_SUCCESS: true, recipient=${normalizedNewEmail}, expiresAt=+10m (OWNER_EMAIL_CHANGE)`);
+
+      try {
+        await sendVerificationEmail(normalizedNewEmail, code, 'Verify your AniVault account');
+      } catch (mailErr: any) {
+        console.error('[OwnerEmailChange] Failed to send email:', mailErr.message);
+        saveTempEmailChange(null);
+        res.status(503).json({
+          error: mailErr.message || 'We couldn’t send the verification email. Please try again.',
+          code: 'EMAIL_SEND_FAILED'
+        });
+        return;
+      }
 
       res.json({
         success: true,

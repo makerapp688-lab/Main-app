@@ -10,11 +10,16 @@ dotenv.config();
 export interface EmailConfigStatus {
   configured: boolean;
   missing: string[];
+  hostConfigured: boolean;
+  userConfigured: boolean;
+  passConfigured: boolean;
+  fromConfigured: boolean;
 }
 
 /**
  * Check if the email service has the minimum required SMTP configuration.
  * Reloads dotenv if present to ensure dynamically added env vars are detected.
+ * Never logs or exposes credential values.
  */
 export function getEmailConfigStatus(): EmailConfigStatus {
   dotenv.config();
@@ -23,20 +28,30 @@ export function getEmailConfigStatus(): EmailConfigStatus {
   const host = (process.env.SMTP_HOST || '').trim().replace(/^["']|["']$/g, '');
   const user = (process.env.SMTP_USER || '').trim().replace(/^["']|["']$/g, '');
   const pass = (process.env.SMTP_PASS || '').trim().replace(/^["']|["']$/g, '');
+  const from = (process.env.SMTP_FROM || '').trim().replace(/^["']|["']$/g, '');
 
-  if (!host) {
+  const hostConfigured = !!host;
+  const userConfigured = !!user;
+  const passConfigured = !!pass;
+  const fromConfigured = !!from || !!user;
+
+  if (!hostConfigured) {
     missing.push('SMTP_HOST');
   }
-  if (!user) {
+  if (!userConfigured) {
     missing.push('SMTP_USER');
   }
-  if (!pass) {
+  if (!passConfigured) {
     missing.push('SMTP_PASS');
   }
 
   return {
     configured: missing.length === 0,
-    missing
+    missing,
+    hostConfigured,
+    userConfigured,
+    passConfigured,
+    fromConfigured
   };
 }
 
@@ -57,9 +72,9 @@ export function createEmailTransporter() {
   let pass = process.env.SMTP_PASS!.trim().replace(/^["']|["']$/g, '');
 
   // Gmail 16-character App Passwords are commonly displayed in 4 space-separated groups (e.g. "abcd efgh ijkl mnop").
-  // If the user pastes with spaces, strip whitespace so SMTP authentication succeeds.
-  if ((host.toLowerCase().includes('gmail') || user.toLowerCase().includes('@gmail.com')) && pass.includes(' ')) {
-    pass = pass.replace(/\s+/g, '');
+  // Strip all standard and unicode whitespace so SMTP authentication succeeds.
+  if ((host.toLowerCase().includes('gmail') || user.toLowerCase().includes('@gmail.com') || pass.length >= 16)) {
+    pass = pass.replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]+/g, '');
   }
 
   const isSecurePort = port === 465;
@@ -113,6 +128,88 @@ function resolveFromAddress(smtpUser: string): string {
   return `"AniVault" <${smtpUser}>`;
 }
 
+export async function testEmailTransport(testRecipient?: string): Promise<{
+  success: boolean;
+  step: string;
+  error?: string;
+  details?: any;
+}> {
+  const status = getEmailConfigStatus();
+  if (!status.configured) {
+    console.error(`[EMAIL_DIAGNOSTIC] SMTP_CONFIGURATION_ERROR: missing=[${status.missing.join(', ')}]`);
+    return {
+      success: false,
+      step: 'SMTP_CONFIGURATION_ERROR',
+      error: `Missing configuration: ${status.missing.join(', ')}`,
+      details: { missing: status.missing }
+    };
+  }
+
+  const transporter = createEmailTransporter();
+  if (!transporter) {
+    return {
+      success: false,
+      step: 'SMTP_CONFIGURATION_ERROR',
+      error: 'Unable to initialize email transporter'
+    };
+  }
+
+  const host = process.env.SMTP_HOST!.trim();
+  const port = parseInt(process.env.SMTP_PORT || '587', 10) || 587;
+
+  try {
+    console.log(`[EMAIL_DIAGNOSTIC] EMAIL_TRANSPORT_TEST_STARTED: host=${host}, port=${port}`);
+    await transporter.verify();
+    console.log(`[EMAIL_DIAGNOSTIC] SMTP_CONNECTION_SUCCESS: host=${host}, port=${port}`);
+    console.log('[EMAIL_DIAGNOSTIC] SMTP_AUTH_SUCCESS: true');
+
+    if (testRecipient) {
+      const recipientDomain = testRecipient.includes('@') ? '@' + testRecipient.split('@')[1] : 'recipient';
+      const smtpUser = process.env.SMTP_USER!.trim().replace(/^["']|["']$/g, '');
+      const from = resolveFromAddress(smtpUser);
+      console.log(`[EMAIL_DIAGNOSTIC] EMAIL_SEND_STARTED: domain=${recipientDomain}`);
+      const info = await transporter.sendMail({
+        from,
+        to: testRecipient,
+        subject: 'AniVault Email Transport Diagnostic Test',
+        text: 'This is an automated test message from AniVault to confirm SMTP transport connectivity.',
+        html: '<div style="font-family:sans-serif;padding:20px;background:#0b0f19;color:#fff;border-radius:8px;">AniVault email transport test successful.</div>'
+      });
+
+      if (info.rejected && info.rejected.length > 0) {
+        console.error(`[EMAIL_DIAGNOSTIC] EMAIL_REJECTED: provider rejected recipient count=${info.rejected.length}`);
+        return {
+          success: false,
+          step: 'EMAIL_REJECTED',
+          error: 'Email provider rejected the message.'
+        };
+      }
+
+      console.log(`[EMAIL_DIAGNOSTIC] EMAIL_ACCEPTED: messageId=${info.messageId}`);
+    }
+
+    return {
+      success: true,
+      step: 'EMAIL_ACCEPTED'
+    };
+  } catch (err: any) {
+    if (err.code === 'EAUTH' || (err.response && err.response.includes('535'))) {
+      console.error(`[EMAIL_DIAGNOSTIC] SMTP_AUTH_FAILED: ${err.message}`);
+      return { success: false, step: 'SMTP_AUTH_FAILED', error: 'Email service authentication failed.' };
+    }
+    if (err.code === 'ETIMEDOUT' || err.code === 'ECONNREFUSED' || err.code === 'ESOCKET' || err.code === 'ENOTFOUND' || err.code === 'EDNS') {
+      console.error(`[EMAIL_DIAGNOSTIC] SMTP_CONNECTION_FAILED: ${err.message}`);
+      return { success: false, step: 'SMTP_CONNECTION_FAILED', error: 'Email service connection failed.' };
+    }
+    if (err.code === 'EENVELOPE' || (err.response && err.response.includes('550'))) {
+      console.error(`[EMAIL_DIAGNOSTIC] EMAIL_REJECTED: ${err.message}`);
+      return { success: false, step: 'EMAIL_REJECTED', error: 'Email provider rejected the message.' };
+    }
+    console.error(`[EMAIL_DIAGNOSTIC] EMAIL_SEND_FAILED: ${err.message}`);
+    return { success: false, step: 'EMAIL_SEND_FAILED', error: 'Email delivery failed.' };
+  }
+}
+
 /**
  * Send real email verification code via authenticated SMTP.
  * Awaits full provider confirmation before returning success.
@@ -125,16 +222,37 @@ export async function sendVerificationEmail(
 ): Promise<{ success: boolean; messageId?: string }> {
   const status = getEmailConfigStatus();
   if (!status.configured) {
-    throw new Error('Email service is not configured correctly.');
+    console.error(`[EMAIL_DIAGNOSTIC] SMTP_CONFIGURATION_ERROR: missing=[${status.missing.join(', ')}]`);
+    throw new Error('Email service is not configured.');
   }
 
   const transporter = createEmailTransporter();
   if (!transporter) {
-    throw new Error('Email service is not configured correctly.');
+    console.error('[EMAIL_DIAGNOSTIC] SMTP_CONFIGURATION_ERROR: transporter initialization returned null');
+    throw new Error('Email service is not configured.');
   }
 
   const smtpUser = process.env.SMTP_USER!.trim().replace(/^["']|["']$/g, '');
   const from = resolveFromAddress(smtpUser);
+  const host = process.env.SMTP_HOST!.trim();
+  const port = parseInt(process.env.SMTP_PORT || '587', 10) || 587;
+
+  const recipientDomain = toEmail.includes('@') ? '@' + toEmail.split('@')[1] : 'recipient';
+  console.log(`[EMAIL_DIAGNOSTIC] EMAIL_SEND_STARTED: domain=${recipientDomain}`);
+
+  // Safe connection verification
+  try {
+    await transporter.verify();
+    console.log(`[EMAIL_DIAGNOSTIC] SMTP_CONNECTION_SUCCESS: host=${host}, port=${port}`);
+    console.log('[EMAIL_DIAGNOSTIC] SMTP_AUTH_SUCCESS: true');
+  } catch (verifyErr: any) {
+    if (verifyErr.code === 'EAUTH' || (verifyErr.response && verifyErr.response.includes('535'))) {
+      console.error(`[EMAIL_DIAGNOSTIC] SMTP_AUTH_FAILED: ${verifyErr.message}`);
+      throw new Error('Email service authentication failed.');
+    }
+    console.error(`[EMAIL_DIAGNOSTIC] SMTP_CONNECTION_FAILED: ${verifyErr.message}`);
+    throw new Error('Email service connection failed.');
+  }
 
   // Generate compliant RFC 5322 Message-ID
   const userDomain = smtpUser.includes('@') ? smtpUser.split('@')[1] : 'anivault.app';
@@ -294,14 +412,15 @@ This is an automated message. Please do not reply to this email.`;
     });
 
     if (info.rejected && info.rejected.length > 0) {
-      console.error('[EmailService] Recipient rejected by SMTP provider:', info.rejected);
-      throw new Error(`Email delivery was rejected by the mail provider for ${toEmail}.`);
+      console.error(`[EMAIL_DIAGNOSTIC] EMAIL_REJECTED: recipient=${toEmail} rejected by provider:`, info.rejected);
+      console.error('[EMAIL_DIAGNOSTIC] INVALID_RECIPIENT: recipient was rejected by the mail server');
+      throw new Error('Email provider rejected the message.');
     }
 
-    console.log(`[EmailService] OTP delivery confirmed by provider. MessageId: ${info.messageId}`);
+    console.log(`[EMAIL_DIAGNOSTIC] EMAIL_ACCEPTED: messageId=${info.messageId}`);
     return { success: true, messageId: info.messageId };
   } catch (err: any) {
-    console.error('[EmailService] SMTP send error:', {
+    console.error('[EMAIL_DIAGNOSTIC] SMTP send error:', {
       message: err.message,
       code: err.code,
       command: err.command,
@@ -309,21 +428,24 @@ This is an automated message. Please do not reply to this email.`;
       responseCode: err.responseCode
     });
 
-    // Provide safe, specific, non-leaking error messages
     if (err.code === 'EAUTH' || (err.response && err.response.includes('535'))) {
-      throw new Error('Email service authentication failed. Please verify your SMTP credentials.');
+      console.error('[EMAIL_DIAGNOSTIC] SMTP_AUTH_FAILED: Authentication rejected by mail provider');
+      throw new Error('Email service authentication failed.');
     }
-    if (err.code === 'ETIMEDOUT' || err.code === 'ECONNREFUSED' || err.code === 'ESOCKET') {
-      throw new Error('Unable to connect to email provider. Connection timed out or refused.');
+    if (err.code === 'EENVELOPE' || (err.response && err.response.includes('550')) || (err.message && err.message.includes('Email provider rejected'))) {
+      console.error('[EMAIL_DIAGNOSTIC] INVALID_SENDER: Sender or recipient was rejected by mail provider');
+      throw new Error('Email provider rejected the message.');
     }
-    if (err.message && err.message.includes('Email delivery was rejected')) {
-      throw err;
+    if (err.code === 'ETIMEDOUT' || err.code === 'ECONNREFUSED' || err.code === 'ESOCKET' || err.code === 'ENOTFOUND' || err.code === 'EDNS') {
+      console.error('[EMAIL_DIAGNOSTIC] SMTP_CONNECTION_FAILED: Connection refused, timed out, or unresolvable hostname');
+      throw new Error('Email service connection failed.');
     }
-    if (err.message && err.message.includes('Email service is not configured correctly')) {
+    if (err.message && (err.message.includes('authentication') || err.message.includes('connection') || err.message.includes('configured'))) {
       throw err;
     }
 
-    throw new Error('Failed to deliver verification email. Please check email service configuration.');
+    console.error(`[EMAIL_DIAGNOSTIC] EMAIL_SEND_FAILED: ${err.message}`);
+    throw new Error('Email delivery failed.');
   }
 }
 

@@ -189,8 +189,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setConfigNotice(null);
     setAuthSuccess(null);
 
-    if (!emailInput || !emailInput.includes('@')) {
-      setAuthError('Please enter a valid email address.');
+    const cleanEmail = emailInput.trim().toLowerCase();
+    const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+
+    if (!cleanEmail || !emailRegex.test(cleanEmail)) {
+      setAuthError('Please enter a valid email address (e.g. user@gmail.com).');
       return;
     }
 
@@ -199,7 +202,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
-    const cleanEmail = emailInput.trim().toLowerCase();
     const cleanUsername = chosenUsername.trim() || cleanEmail.split('@')[0] || 'AnimeExplorer';
 
     setLoading(true);
@@ -219,14 +221,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
         const data = await res.json();
         if (!res.ok) {
-          if (data.code === 'EMAIL_NOT_CONFIGURED') {
-            setConfigNotice({
-              provider: 'email',
-              message: data.error || 'Email service is not configured. Real verification requires SMTP settings in environment variables.'
-            });
-            throw new Error(data.error);
-          }
-          throw new Error(data.error || 'Registration failed.');
+          throw new Error(data.error || 'Email verification is temporarily unavailable. Please try again later.');
         }
 
         setAuthSuccess(data.message || 'Verification code sent to your email.');
@@ -719,7 +714,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     </button>
                   </div>
 
-                  <form onSubmit={handleEmailAuthSubmit} className="space-y-3">
+                  <form noValidate onSubmit={handleEmailAuthSubmit} className="space-y-3">
                     {authMode === 'register' && (
                       <div>
                         <label className="block text-[11px] font-semibold text-slate-400 dark:text-slate-400 light:text-slate-600 mb-1">
@@ -830,7 +825,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </>
               ) : (
                 /* STEP 2: Real Email Verification Code Form */
-                <form onSubmit={handleVerifyCodeSubmit} className="space-y-4 animate-fade-in">
+                <form noValidate onSubmit={handleVerifyCodeSubmit} className="space-y-4 animate-fade-in">
                   <div className="p-3.5 bg-slate-950/90 dark:bg-slate-950/90 light:bg-slate-100 border border-slate-800 dark:border-slate-800 light:border-slate-300 rounded-xl space-y-1.5 text-center">
                     <div className="font-bold text-sm text-white dark:text-white light:text-slate-900 flex items-center justify-center gap-1.5">
                       <KeyRound className="w-4 h-4 text-rose-500" />
