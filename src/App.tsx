@@ -47,7 +47,6 @@ import fallbackReport from './data/sync-report.json';
 export function App() {
   const [allAnime, setAllAnime] = useState<Anime[]>(fallbackCatalogue as Anime[]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [isSessionChecking, setIsSessionChecking] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedGenre, setSelectedGenre] = useState<string>('All');
   const [selectedType, setSelectedType] = useState<string>('All');
@@ -75,12 +74,15 @@ export function App() {
     account,
     userData,
     isGuest,
+    authStatus,
     isFavorite,
     isWatchlist,
     isCompleted,
     addToHistory,
     clearHistory
   } = useUserData();
+
+  const isSessionChecking = authStatus === 'AUTH_LOADING';
 
   // Apply theme on initial load
   useEffect(() => {
@@ -89,15 +91,7 @@ export function App() {
 
   // Restore and synchronize authenticated session with server on startup
   useEffect(() => {
-    let active = true;
-    syncWithServerSession().finally(() => {
-      if (active) {
-        setIsSessionChecking(false);
-      }
-    });
-    return () => {
-      active = false;
-    };
+    syncWithServerSession();
   }, []);
 
   // Fetch from backend API

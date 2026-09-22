@@ -569,10 +569,20 @@ export function logoutToGuest(): void {
 export function setSessionAccount(account: UserAccount, sessionToken?: string): void {
   if (sessionToken) {
     try {
-      localStorage.setItem('anivault_user_session_token', sessionToken);
+      if (account.role === 'owner') {
+        localStorage.setItem('anivault_owner_session_token', sessionToken);
+      } else {
+        localStorage.setItem('anivault_user_session_token', sessionToken);
+      }
     } catch {}
   }
   saveSession(account);
+}
+
+let initialSyncCompleted = false;
+
+export function isInitialSyncCompleted(): boolean {
+  return initialSyncCompleted;
 }
 
 /**
@@ -626,6 +636,9 @@ export async function syncWithServerSession(): Promise<UserAccount | null> {
     }
   } catch (err) {
     console.warn('Failed to sync server session:', err);
+  } finally {
+    initialSyncCompleted = true;
+    notifyListeners();
   }
   return null;
 }

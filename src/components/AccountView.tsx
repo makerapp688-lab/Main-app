@@ -30,7 +30,8 @@ import {
   setThemeMode,
   logoutToGuest,
   logoutFromServer,
-  clearHistory
+  clearHistory,
+  setSessionAccount
 } from '../utils/userStorage.ts';
 import { ThemeMode } from '../types.ts';
 import { AniVaultLogo } from './AniVaultLogo.tsx';
@@ -82,18 +83,7 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
 
   const handleOwnerLogout = async () => {
     try {
-      const token = localStorage.getItem('anivault_owner_session_token');
-      const headers: Record<string, string> = {};
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-        headers['x-anivault-owner-session'] = token;
-      }
-      await fetch('/api/owner/logout', {
-        method: 'POST',
-        headers,
-        credentials: 'include'
-      });
-      localStorage.removeItem('anivault_owner_session_token');
+      await logoutFromServer();
       setOwnerSession({ authenticated: false });
     } catch (err) {
       console.error('Failed to log out owner', err);
@@ -664,6 +654,16 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
         onLoginSuccess={(owner) => {
           setOwnerSession({ authenticated: true, owner });
           setIsOwnerLoginOpen(false);
+          const ownerToken = localStorage.getItem('anivault_owner_session_token') || undefined;
+          setSessionAccount({
+            id: 'usr_owner',
+            username: owner.username,
+            name: owner.username,
+            email: owner.email,
+            provider: 'email',
+            role: 'owner',
+            createdAt: new Date().toISOString()
+          }, ownerToken);
         }}
       />
 

@@ -251,15 +251,19 @@ function parseCookies(req: Request): Record<string, string> {
 
 function setSessionCookie(res: Response, name: string, value: string, maxAgeSeconds: number, req?: Request): void {
   const isSecure = req ? (req.secure || req.headers['x-forwarded-proto'] === 'https') : true;
+  const expiresString = maxAgeSeconds <= 0 
+    ? 'Thu, 01 Jan 1970 00:00:00 GMT' 
+    : new Date(Date.now() + maxAgeSeconds * 1000).toUTCString();
+
   if (isSecure) {
     res.setHeader(
       'Set-Cookie',
-      `${name}=${value}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${maxAgeSeconds}; Partitioned`
+      `${name}=${value}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${maxAgeSeconds}; Expires=${expiresString}; Partitioned`
     );
   } else {
     res.setHeader(
       'Set-Cookie',
-      `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`
+      `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}; Expires=${expiresString}`
     );
   }
 }
@@ -317,14 +321,29 @@ export function authenticateSession(req: Request, res: Response, next: NextFunct
     return next();
   }
 
-  const session = activeSessions.get(sessionId);
+  let session = activeSessions.get(sessionId);
   if (!session || session.expiresAt < Date.now()) {
-    if (sessionId) {
-      activeSessions.delete(sessionId);
+    // Decode cryptographic token fallback
+    const decoded = verifyAndDecodeSessionToken(sessionId);
+    if (decoded && decoded.role === 'owner') {
+      session = {
+        sessionId,
+        email: decoded.email,
+        username: decoded.username,
+        role: 'owner',
+        createdAt: decoded.expiresAt - 30 * 24 * 60 * 60 * 1000,
+        expiresAt: decoded.expiresAt
+      };
+      activeSessions.set(sessionId, session);
       saveSessions();
+    } else {
+      if (sessionId) {
+        activeSessions.delete(sessionId);
+        saveSessions();
+      }
+      (req as any).ownerSession = null;
+      return next();
     }
-    (req as any).ownerSession = null;
-    return next();
   }
 
   const owner = getOwnerAccount();

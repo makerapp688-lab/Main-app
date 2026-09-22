@@ -10,17 +10,20 @@ import {
   setThemeMode,
   addToHistory,
   clearHistory,
-  logoutToGuest
+  logoutToGuest,
+  isInitialSyncCompleted
 } from '../utils/userStorage.ts';
 
 export function useUserData() {
   const [account, setAccount] = useState<UserAccount>(getCurrentAccount());
   const [userData, setUserData] = useState<UserData>(getUserData());
+  const [synced, setSynced] = useState<boolean>(isInitialSyncCompleted());
 
   useEffect(() => {
     const update = () => {
       setAccount(getCurrentAccount());
       setUserData(getUserData());
+      setSynced(isInitialSyncCompleted());
     };
     update();
     const unsubscribe = subscribeUserStorage(update);
@@ -30,6 +33,12 @@ export function useUserData() {
   const isFavorite = (animeId: string) => userData.favorites.includes(animeId);
   const isWatchlist = (animeId: string) => userData.watchlist.includes(animeId);
   const isCompleted = (animeId: string) => userData.completed.includes(animeId);
+
+  const authStatus: 'AUTH_LOADING' | 'AUTHENTICATED' | 'GUEST' = !synced
+    ? 'AUTH_LOADING'
+    : account.provider !== 'guest'
+    ? 'AUTHENTICATED'
+    : 'GUEST';
 
   return {
     account,
@@ -44,6 +53,7 @@ export function useUserData() {
     clearHistory,
     setTheme: setThemeMode,
     logout: logoutToGuest,
-    isGuest: account.provider === 'guest'
+    authStatus,
+    isGuest: authStatus === 'GUEST'
   };
 }
