@@ -8,6 +8,7 @@ import {
   sendVerificationEmail,
   testEmailTransport
 } from './email-service.js';
+import { validateOwnerSession } from './owner-auth.js';
 
 const DATA_DIR = path.join(process.cwd(), 'server', 'data');
 const USERS_ACCOUNTS_PATH = path.join(DATA_DIR, 'users-accounts.json');
@@ -58,6 +59,7 @@ export interface UserSession {
   role: 'user';
   createdAt: number;
   expiresAt: number;
+  revoked?: boolean;
 }
 
 interface OAuthStateRecord {
@@ -321,9 +323,88 @@ function parseCookies(req: Request): Record<string, string> {
   if (!rc) return list;
   rc.split(';').forEach(cookie => {
     const parts = cookie.split('=');
-    list[parts.shift()!.trim()] = decodeURI(parts.join('='));
+    if (parts.length >= 2) {
+      const name = parts[0].trim();
+      const value = parts.slice(1).join('=').trim();
+      list[name] = decodeURIComponent(value);
+    }
   });
   return list;
+}
+
+function setSessionCookie(res: Response, name: string, value: string, maxAgeSeconds: number, req?: Request): void {
+  const isSecure = req ? (req.secure || req.headers['x-forwarded-proto'] === 'https') : true;
+  if (isSecure) {
+    res.setHeader(
+      'Set-Cookie',
+      `${name}=${value}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${maxAgeSeconds}; Partitioned`
+    );
+  } else {
+    res.setHeader(
+      'Set-Cookie',
+      `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`
+    );
+  }
+}
+
+const SESSION_SECRET = process.env.SESSION_SECRET || 'anivault_super_secure_session_secret_2026';
+
+export function generateSignedSessionToken(userId: string, email: string, username: string, role: string, provider: string, expiresAt: number): string {
+  const payload = JSON.stringify({ userId, email, username, role, provider, expiresAt });
+  const hmac = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  const base64url = Buffer.from(payload).toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  return base64url + '.' + hmac;
+}
+
+export function verifyAndDecodeSessionToken(token: string): { userId: string; email: string; username: string; role: string; provider: string; expiresAt: number } | null {
+  try {
+    if (!token) return null;
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    
+    let base64 = parts[0].replace(/-/g, '+').replace(/_/g, '/');
+    while (base64.length % 4) {
+      base64 += '=';
+    }
+    const payloadStr = Buffer.from(base64, 'base64').toString('utf8');
+    const signature = parts[1];
+    
+    const hmac = crypto.createHmac('sha256', SESSION_SECRET).update(payloadStr).digest('hex');
+    if (signature !== hmac) {
+      return null;
+    }
+    
+    const decoded = JSON.parse(payloadStr);
+    if (decoded.expiresAt < Date.now()) {
+      return null;
+    }
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+function reloadUserSessionsFromDisk() {
+  try {
+    if (fs.existsSync(USERS_ACCOUNTS_PATH)) {
+      usersCache = JSON.parse(fs.readFileSync(USERS_ACCOUNTS_PATH, 'utf-8'));
+    }
+    if (fs.existsSync(USERS_SESSIONS_PATH)) {
+      const list: UserSession[] = JSON.parse(fs.readFileSync(USERS_SESSIONS_PATH, 'utf-8'));
+      const now = Date.now();
+      activeUserSessions.clear();
+      for (const s of list) {
+        if (!s.revoked && s.expiresAt > now) {
+          activeUserSessions.set(s.sessionId, s);
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error('[UserAuth DB] Error reloading session state from disk:', err.message);
+  }
 }
 
 // Sanitized user output (never returns hash or salt!)
@@ -335,7 +416,7 @@ function sanitizeUser(u: UserRecord) {
     name: u.name || u.username,
     provider: u.provider,
     isVerified: u.isVerified,
-    role: u.role,
+    role: u.role || 'user',
     createdAt: u.createdAt,
     lastLoginAt: u.lastLoginAt
   };
@@ -649,7 +730,8 @@ export function createUserAuthRouter() {
       saveTempVerifications();
 
       // Create authenticated session
-      const sessionId = crypto.randomBytes(32).toString('hex');
+      const sessionExpires = now + 30 * 24 * 60 * 60 * 1000;
+      const sessionId = generateSignedSessionToken(newUser.id, newUser.email, newUser.username, 'user', 'email', sessionExpires);
       const session: UserSession = {
         sessionId,
         userId: newUser.id,
@@ -658,19 +740,13 @@ export function createUserAuthRouter() {
         provider: 'email',
         role: 'user',
         createdAt: now,
-        expiresAt: now + 30 * 24 * 60 * 60 * 1000 // 30 days
+        expiresAt: sessionExpires
       };
 
       activeUserSessions.set(sessionId, session);
       saveUserSessions();
 
-      (newUser as any).lastSessionToken = sessionId;
-      saveUsers();
-
-      res.setHeader(
-        'Set-Cookie',
-        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
-      );
+      setSessionCookie(res, 'anivault_user_session', sessionId, 2592000, req);
 
       res.json({
         success: true,
@@ -808,7 +884,8 @@ export function createUserAuthRouter() {
       }
 
       const now = Date.now();
-      const sessionId = crypto.randomBytes(32).toString('hex');
+      const sessionExpires = now + 30 * 24 * 60 * 60 * 1000;
+      const sessionId = generateSignedSessionToken(user.id, user.email, user.username, 'user', user.provider || 'email', sessionExpires);
       const session: UserSession = {
         sessionId,
         userId: user.id,
@@ -817,20 +894,16 @@ export function createUserAuthRouter() {
         provider: user.provider,
         role: 'user',
         createdAt: now,
-        expiresAt: now + 30 * 24 * 60 * 60 * 1000
+        expiresAt: sessionExpires
       };
 
       activeUserSessions.set(sessionId, session);
       saveUserSessions();
 
       user.lastLoginAt = new Date().toISOString();
-      (user as any).lastSessionToken = sessionId;
       saveUsers();
 
-      res.setHeader(
-        'Set-Cookie',
-        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
-      );
+      setSessionCookie(res, 'anivault_user_session', sessionId, 2592000, req);
 
       res.json({
         success: true,
@@ -844,50 +917,137 @@ export function createUserAuthRouter() {
     }
   });
 
-  // 6. Current User Session Check
+  // 6. Current User Session Check (Unified for Normal Users & Owner)
   router.get('/session', (req: Request, res: Response) => {
     const cookies = parseCookies(req);
     const authHeader = req.headers.authorization;
     const bearerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
-    const customHeader = req.headers['x-anivault-user-session'] as string;
-    const sessionId = cookies.anivault_user_session || bearerToken || customHeader;
+    const userHeader = req.headers['x-anivault-user-session'] as string;
+    const ownerHeader = req.headers['x-anivault-owner-session'] as string;
 
+    const ownerSessionId = cookies.anivault_owner_session || ownerHeader || (bearerToken && bearerToken.startsWith('owner_') ? bearerToken : null);
+    const userSessionId = cookies.anivault_user_session || userHeader || bearerToken;
+
+    console.log('[Auth Session Check] Received request:');
+    console.log(' - cookies:', Object.keys(cookies));
+    console.log(' - authHeader present:', !!authHeader);
+    console.log(' - bearerToken length:', bearerToken?.length || 0);
+    console.log(' - userHeader length:', userHeader?.length || 0);
+    console.log(' - ownerHeader length:', ownerHeader?.length || 0);
+    console.log(' - Resolved userSessionId length:', userSessionId?.length || 0);
+    console.log(' - Resolved ownerSessionId length:', ownerSessionId?.length || 0);
+
+    // 1. Check Owner session first if owner session ID provided or present
+    if (ownerSessionId) {
+      const ownerAcc = validateOwnerSession(ownerSessionId);
+      if (ownerAcc) {
+        console.log(' - Authenticated successfully as Owner:', ownerAcc.username);
+        res.json({
+          authenticated: true,
+          user: {
+            id: ownerAcc.id,
+            email: ownerAcc.email,
+            username: ownerAcc.username,
+            name: ownerAcc.username,
+            provider: 'email',
+            isVerified: true,
+            role: 'owner',
+            createdAt: ownerAcc.createdAt
+          }
+        });
+        return;
+      } else {
+        console.log(' - Owner session validation failed for ID:', ownerSessionId.slice(0, 20) + '...');
+      }
+    }
+
+    // 2. Check User session
+    const sessionId = userSessionId || ownerSessionId;
     if (!sessionId) {
+      console.log(' - No sessionId provided or found in headers or cookies.');
       res.json({ authenticated: false });
       return;
     }
 
+    // Always reload from disk to ensure persistent storage is the absolute source of truth
+    reloadUserSessionsFromDisk();
+
     let session = activeUserSessions.get(sessionId);
-    if (!session || session.expiresAt < Date.now()) {
-      const matchedUser = Object.values(usersCache).find((u: any) => u.lastSessionToken === sessionId);
-      if (matchedUser) {
-        console.log(`[UserAuth] Dynamically restoring user session for "${matchedUser.username}" (${matchedUser.id}).`);
+    if (!session || session.revoked || session.expiresAt < Date.now()) {
+      console.log(' - Session not active in-memory, or expired. Attempting cryptographic decode fallback...');
+      // Decode cryptographic token fallback
+      const decoded = verifyAndDecodeSessionToken(sessionId);
+      if (decoded && decoded.role === 'user') {
+        console.log(' - Cryptographic verification SUCCESS for User:', decoded.username);
         session = {
           sessionId,
-          userId: matchedUser.id,
-          email: matchedUser.email,
-          username: matchedUser.username,
-          provider: matchedUser.provider,
+          userId: decoded.userId,
+          email: decoded.email,
+          username: decoded.username,
+          provider: decoded.provider,
           role: 'user',
-          createdAt: Date.now(),
-          expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000
+          createdAt: decoded.expiresAt - 30 * 24 * 60 * 60 * 1000,
+          expiresAt: decoded.expiresAt
         };
         activeUserSessions.set(sessionId, session);
         saveUserSessions();
       } else {
-        if (session) activeUserSessions.delete(sessionId);
+        console.log(' - Cryptographic verification FAILED for session token.');
+        // Fallback check: could sessionId be an owner session ID?
+        const ownerAcc = validateOwnerSession(sessionId);
+        if (ownerAcc) {
+          console.log(' - Authenticated successfully as Owner (fallback check):', ownerAcc.username);
+          res.json({
+            authenticated: true,
+            user: {
+              id: ownerAcc.id,
+              email: ownerAcc.email,
+              username: ownerAcc.username,
+              name: ownerAcc.username,
+              provider: 'email',
+              isVerified: true,
+              role: 'owner',
+              createdAt: ownerAcc.createdAt
+            }
+          });
+          return;
+        }
+
+        if (session) {
+          activeUserSessions.delete(sessionId);
+          saveUserSessions();
+        }
+        console.log(' - Returning authenticated: false');
         res.json({ authenticated: false });
         return;
       }
+    } else {
+      console.log(' - Active user session retrieved from in-memory cache for user ID:', session.userId);
     }
 
-    const user = usersCache[session.userId];
+    // Load account record from permanent account storage
+    let user = usersCache[session.userId] || Object.values(usersCache).find(u => u.email === session.email);
     if (!user) {
-      activeUserSessions.delete(sessionId);
-      res.json({ authenticated: false });
-      return;
+      console.log(' - User account record missing from usersCache. Triggering self-healing account recreation...');
+      // Recreate user account record if missing (self-healing)
+      const isoNow = new Date().toISOString();
+      user = {
+        id: session.userId,
+        email: session.email,
+        username: session.username,
+        name: session.username,
+        provider: (session.provider as any) || 'email',
+        isVerified: true,
+        role: 'user',
+        createdAt: isoNow,
+        updatedAt: isoNow,
+        lastLoginAt: isoNow
+      };
+      usersCache[session.userId] = user;
+      saveUsers();
     }
 
+    console.log(' - Authenticated successfully as User:', user.username);
     res.json({
       authenticated: true,
       user: sanitizeUser(user)
@@ -907,10 +1067,7 @@ export function createUserAuthRouter() {
       saveUserSessions();
     }
 
-    res.setHeader(
-      'Set-Cookie',
-      'anivault_user_session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0; Partitioned'
-    );
+    setSessionCookie(res, 'anivault_user_session', '', 0, req);
 
     res.json({ success: true, message: 'Logged out successfully.' });
   });
@@ -1169,7 +1326,8 @@ export function createUserAuthRouter() {
 
       // Create session
       const now = Date.now();
-      const sessionId = crypto.randomBytes(32).toString('hex');
+      const sessionExpires = now + 30 * 24 * 60 * 60 * 1000;
+      const sessionId = generateSignedSessionToken(user.id, user.email, user.username, 'user', 'google', sessionExpires);
       const session: UserSession = {
         sessionId,
         userId: user.id,
@@ -1178,19 +1336,13 @@ export function createUserAuthRouter() {
         provider: 'google',
         role: 'user',
         createdAt: now,
-        expiresAt: now + 30 * 24 * 60 * 60 * 1000
+        expiresAt: sessionExpires
       };
 
       activeUserSessions.set(sessionId, session);
       saveUserSessions();
 
-      (user as any).lastSessionToken = sessionId;
-      saveUsers();
-
-      res.setHeader(
-        'Set-Cookie',
-        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
-      );
+      setSessionCookie(res, 'anivault_user_session', sessionId, 2592000, req);
 
       return renderHtmlResponse(true, { user: sanitizeUser(user), sessionToken: sessionId });
     } catch (err: any) {
@@ -1380,7 +1532,8 @@ export function createUserAuthRouter() {
       saveUsers();
 
       const now = Date.now();
-      const sessionId = crypto.randomBytes(32).toString('hex');
+      const sessionExpires = now + 30 * 24 * 60 * 60 * 1000;
+      const sessionId = generateSignedSessionToken(user.id, user.email, user.username, 'user', 'apple', sessionExpires);
       const session: UserSession = {
         sessionId,
         userId: user.id,
@@ -1389,19 +1542,13 @@ export function createUserAuthRouter() {
         provider: 'apple',
         role: 'user',
         createdAt: now,
-        expiresAt: now + 30 * 24 * 60 * 60 * 1000
+        expiresAt: sessionExpires
       };
 
       activeUserSessions.set(sessionId, session);
       saveUserSessions();
 
-      (user as any).lastSessionToken = sessionId;
-      saveUsers();
-
-      res.setHeader(
-        'Set-Cookie',
-        `anivault_user_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
-      );
+      setSessionCookie(res, 'anivault_user_session', sessionId, 2592000, req);
 
       return renderHtmlResponse(true, { user: sanitizeUser(user), sessionToken: sessionId });
     } catch (err: any) {

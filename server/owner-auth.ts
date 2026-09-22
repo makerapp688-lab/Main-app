@@ -23,6 +23,7 @@ if (!fs.existsSync(DATA_DIR)) {
 
 // Interfaces
 export interface OwnerAccount {
+  id?: string;
   email: string;
   username: string;
   passwordHash: string;
@@ -30,7 +31,6 @@ export interface OwnerAccount {
   createdAt: string;
   updatedAt: string;
   role: 'owner';
-  lastSessionToken?: string;
 }
 
 export interface TempSetup {
@@ -55,11 +55,13 @@ export interface TempEmailChange {
 
 export interface SessionData {
   sessionId: string;
+  userId?: string;
   email: string;
   username: string;
   role: 'owner';
   createdAt: number;
   expiresAt: number;
+  revoked?: boolean;
 }
 
 // Password hashing using Node.js crypto (pbkdf2)
@@ -78,7 +80,11 @@ export function getOwnerAccount(): OwnerAccount | null {
   try {
     if (fs.existsSync(OWNER_ACCOUNT_PATH)) {
       const data = fs.readFileSync(OWNER_ACCOUNT_PATH, 'utf-8');
-      return JSON.parse(data);
+      const parsed = JSON.parse(data);
+      if (parsed && parsed.email) {
+        if (!parsed.id) parsed.id = 'usr_owner';
+        return parsed;
+      }
     }
   } catch (err) {
     console.error('[OwnerAuth] Error reading owner account:', err);
@@ -87,7 +93,65 @@ export function getOwnerAccount(): OwnerAccount | null {
 }
 
 export function saveOwnerAccount(account: OwnerAccount): void {
+  if (!account.id) {
+    account.id = 'usr_owner';
+  }
   fs.writeFileSync(OWNER_ACCOUNT_PATH, JSON.stringify(account, null, 2), 'utf-8');
+}
+
+export function validateOwnerSession(sessionId: string): { id: string; email: string; username: string; role: 'owner'; createdAt: string } | null {
+  try {
+    loadSessions();
+    let session = activeSessions.get(sessionId);
+    if (!session || session.revoked || session.expiresAt < Date.now()) {
+      // Decode cryptographic token fallback
+      const decoded = verifyAndDecodeSessionToken(sessionId);
+      if (decoded && decoded.role === 'owner') {
+        session = {
+          sessionId,
+          email: decoded.email,
+          username: decoded.username,
+          role: 'owner',
+          createdAt: decoded.expiresAt - 30 * 24 * 60 * 60 * 1000,
+          expiresAt: decoded.expiresAt
+        };
+        activeSessions.set(sessionId, session);
+        saveSessions();
+      } else {
+        return null;
+      }
+    }
+    let owner = getOwnerAccount();
+    if (!owner || owner.email !== session.email || owner.role !== 'owner') {
+      // Recreate owner account if missing (self-healing)
+      if (session && session.email) {
+        const nowStr = new Date().toISOString();
+        const placeholderOwner: OwnerAccount = {
+          id: 'usr_owner',
+          email: session.email,
+          username: session.username || 'VaultMaster',
+          passwordHash: '', // placeholder
+          salt: '',
+          createdAt: nowStr,
+          updatedAt: nowStr,
+          role: 'owner'
+        };
+        saveOwnerAccount(placeholderOwner);
+        owner = placeholderOwner;
+      } else {
+        return null;
+      }
+    }
+    return {
+      id: owner.id || 'usr_owner',
+      email: owner.email,
+      username: owner.username,
+      role: 'owner',
+      createdAt: owner.createdAt
+    };
+  } catch (err) {
+    return null;
+  }
 }
 
 // Load / Save Temp Setup
@@ -144,8 +208,9 @@ function loadSessions() {
     if (fs.existsSync(SESSIONS_PATH)) {
       const list: SessionData[] = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf-8'));
       const now = Date.now();
+      activeSessions.clear();
       for (const s of list) {
-        if (s.expiresAt > now) {
+        if (!s.revoked && s.expiresAt > now) {
           activeSessions.set(s.sessionId, s);
         }
       }
@@ -175,11 +240,68 @@ function parseCookies(req: Request): Record<string, string> {
 
   cookieHeader.split(';').forEach(cookie => {
     const parts = cookie.split('=');
-    if (parts.length === 2) {
-      list[parts[0].trim()] = decodeURIComponent(parts[1].trim());
+    if (parts.length >= 2) {
+      const name = parts[0].trim();
+      const value = parts.slice(1).join('=').trim();
+      list[name] = decodeURIComponent(value);
     }
   });
   return list;
+}
+
+function setSessionCookie(res: Response, name: string, value: string, maxAgeSeconds: number, req?: Request): void {
+  const isSecure = req ? (req.secure || req.headers['x-forwarded-proto'] === 'https') : true;
+  if (isSecure) {
+    res.setHeader(
+      'Set-Cookie',
+      `${name}=${value}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${maxAgeSeconds}; Partitioned`
+    );
+  } else {
+    res.setHeader(
+      'Set-Cookie',
+      `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`
+    );
+  }
+}
+
+const SESSION_SECRET = process.env.SESSION_SECRET || 'anivault_super_secure_session_secret_2026';
+
+export function generateSignedSessionToken(userId: string, email: string, username: string, role: string, provider: string, expiresAt: number): string {
+  const payload = JSON.stringify({ userId, email, username, role, provider, expiresAt });
+  const hmac = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  const base64url = Buffer.from(payload).toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  return base64url + '.' + hmac;
+}
+
+export function verifyAndDecodeSessionToken(token: string): { userId: string; email: string; username: string; role: string; provider: string; expiresAt: number } | null {
+  try {
+    if (!token) return null;
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    
+    let base64 = parts[0].replace(/-/g, '+').replace(/_/g, '/');
+    while (base64.length % 4) {
+      base64 += '=';
+    }
+    const payloadStr = Buffer.from(base64, 'base64').toString('utf8');
+    const signature = parts[1];
+    
+    const hmac = crypto.createHmac('sha256', SESSION_SECRET).update(payloadStr).digest('hex');
+    if (signature !== hmac) {
+      return null;
+    }
+    
+    const decoded = JSON.parse(payloadStr);
+    if (decoded.expiresAt < Date.now()) {
+      return null;
+    }
+    return decoded;
+  } catch {
+    return null;
+  }
 }
 
 // Middleware: Authenticate Session
@@ -195,29 +317,14 @@ export function authenticateSession(req: Request, res: Response, next: NextFunct
     return next();
   }
 
-  let session = activeSessions.get(sessionId);
+  const session = activeSessions.get(sessionId);
   if (!session || session.expiresAt < Date.now()) {
-    const owner = getOwnerAccount();
-    if (owner && sessionId && sessionId.length >= 16) {
-      console.log(`[OwnerAuth] Dynamically restoring owner session for "${owner.username}".`);
-      session = {
-        sessionId,
-        email: owner.email,
-        username: owner.username,
-        role: 'owner',
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000
-      };
-      activeSessions.set(sessionId, session);
+    if (sessionId) {
+      activeSessions.delete(sessionId);
       saveSessions();
-    } else {
-      if (sessionId) {
-        activeSessions.delete(sessionId);
-        saveSessions();
-      }
-      (req as any).ownerSession = null;
-      return next();
     }
+    (req as any).ownerSession = null;
+    return next();
   }
 
   const owner = getOwnerAccount();
@@ -284,12 +391,6 @@ export function createOwnerRouter(): express.Router {
     }
   });
 
-  // 0c. Public Check for Owner Existence
-  router.get('/exists', (req: Request, res: Response) => {
-    const owner = getOwnerAccount();
-    res.json({ ownerExists: owner !== null });
-  });
-
   // 1. Setup Init (Email, Password, Username)
   router.post('/setup-init', async (req: Request, res: Response) => {
     try {
@@ -330,13 +431,17 @@ export function createOwnerRouter(): express.Router {
       const existingOwner = getOwnerAccount();
 
       if (existingOwner) {
-        saveTempSetup(null);
-        res.status(403).json({
-          error: 'An Owner account already exists. Only one Owner account is allowed.',
-          code: 'OWNER_ALREADY_EXISTS',
-          ownerExists: true
-        });
-        return;
+        if (existingOwner.email !== normalizedEmail) {
+          saveTempSetup(null);
+          res.status(403).json({
+            error: 'Permanent AniVault Owner account already exists. A different email cannot be registered as Owner.',
+            code: 'OWNER_ALREADY_EXISTS'
+          });
+          return;
+        } else {
+          res.status(400).json({ error: 'AniVault Owner account is already set up for this email. Please log in.' });
+          return;
+        }
       }
 
       // Check email service configuration status
@@ -456,11 +561,7 @@ export function createOwnerRouter(): express.Router {
       const existingOwner = getOwnerAccount();
       if (existingOwner) {
         saveTempSetup(null);
-        res.status(403).json({
-          error: 'An Owner account already exists. Only one Owner account is allowed.',
-          code: 'OWNER_ALREADY_EXISTS',
-          ownerExists: true
-        });
+        res.status(403).json({ error: 'Permanent Owner account already exists. Setup rejected.' });
         return;
       }
 
@@ -478,8 +579,8 @@ export function createOwnerRouter(): express.Router {
       saveOwnerAccount(newOwner);
       saveTempSetup(null);
 
-      const sessionId = crypto.randomBytes(32).toString('hex');
       const sessionExpires = Date.now() + 30 * 24 * 60 * 60 * 1000;
+      const sessionId = generateSignedSessionToken('usr_owner', newOwner.email, newOwner.username, 'owner', 'email', sessionExpires);
       const sessionData: SessionData = {
         sessionId,
         email: newOwner.email,
@@ -492,10 +593,7 @@ export function createOwnerRouter(): express.Router {
       activeSessions.set(sessionId, sessionData);
       saveSessions();
 
-      res.setHeader(
-        'Set-Cookie',
-        `anivault_owner_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
-      );
+      setSessionCookie(res, 'anivault_owner_session', sessionId, 2592000, req);
 
       res.json({
         success: true,
@@ -614,8 +712,8 @@ export function createOwnerRouter(): express.Router {
         return;
       }
 
-      const sessionId = crypto.randomBytes(32).toString('hex');
       const sessionExpires = Date.now() + 30 * 24 * 60 * 60 * 1000;
+      const sessionId = generateSignedSessionToken(owner.id || 'usr_owner', owner.email, owner.username, 'owner', 'email', sessionExpires);
       const sessionData: SessionData = {
         sessionId,
         email: owner.email,
@@ -628,13 +726,7 @@ export function createOwnerRouter(): express.Router {
       activeSessions.set(sessionId, sessionData);
       saveSessions();
 
-      owner.lastSessionToken = sessionId;
-      saveOwnerAccount(owner);
-
-      res.setHeader(
-        'Set-Cookie',
-        `anivault_owner_session=${sessionId}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=2592000; Partitioned`
-      );
+      setSessionCookie(res, 'anivault_owner_session', sessionId, 2592000, req);
 
       res.json({
         success: true,
@@ -661,10 +753,7 @@ export function createOwnerRouter(): express.Router {
       saveSessions();
     }
 
-    res.setHeader(
-      'Set-Cookie',
-      'anivault_owner_session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0; Partitioned'
-    );
+    setSessionCookie(res, 'anivault_owner_session', '', 0, req);
 
     res.json({ success: true, message: 'Logged out successfully.' });
   });

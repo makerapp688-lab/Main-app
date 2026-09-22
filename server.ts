@@ -8,6 +8,7 @@ import { createOwnerRouter } from './server/owner-auth.js';
 import { createUserAuthRouter } from './server/user-auth.js';
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = 3000;
 
 app.use(express.json());

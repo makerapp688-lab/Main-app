@@ -47,6 +47,7 @@ import fallbackReport from './data/sync-report.json';
 export function App() {
   const [allAnime, setAllAnime] = useState<Anime[]>(fallbackCatalogue as Anime[]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isSessionChecking, setIsSessionChecking] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedGenre, setSelectedGenre] = useState<string>('All');
   const [selectedType, setSelectedType] = useState<string>('All');
@@ -88,7 +89,15 @@ export function App() {
 
   // Restore and synchronize authenticated session with server on startup
   useEffect(() => {
-    syncWithServerSession();
+    let active = true;
+    syncWithServerSession().finally(() => {
+      if (active) {
+        setIsSessionChecking(false);
+      }
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   // Fetch from backend API
@@ -315,6 +324,33 @@ export function App() {
     }
     return list;
   }, [allAnime, userData.history]);
+
+  if (isSessionChecking) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center space-y-6 text-slate-100 antialiased select-none">
+        <div className="relative flex flex-col items-center">
+          {/* Pulsing beautiful logo container */}
+          <div className="w-20 h-20 rounded-2xl bg-rose-600 flex items-center justify-center font-black text-white text-3xl shadow-xl shadow-rose-600/30 animate-pulse">
+            AV
+          </div>
+          <div className="mt-8 flex flex-col items-center space-y-2">
+            <h2 className="text-lg font-bold tracking-wider text-slate-200">Restoring Session...</h2>
+            <p className="text-xs text-slate-400">Verifying secure credentials with AniVault</p>
+          </div>
+          {/* Spinner track */}
+          <div className="mt-6 w-32 h-1 bg-slate-900 rounded-full overflow-hidden relative">
+            <div className="absolute top-0 left-0 h-full w-12 bg-rose-500 rounded-full animate-[loading_1.5s_infinite_ease-in-out]"></div>
+          </div>
+        </div>
+        <style>{`
+          @keyframes loading {
+            0% { transform: translate3d(-100%, 0, 0); }
+            100% { transform: translate3d(300%, 0, 0); }
+          }
+        `}</style>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 dark:bg-slate-950 light:bg-slate-50 text-slate-100 dark:text-slate-100 light:text-slate-900 flex flex-col antialiased selection:bg-rose-600 selection:text-white pb-20 md:pb-0 transition-colors">

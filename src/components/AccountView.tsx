@@ -71,6 +71,9 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
       if (res.ok) {
         const data = await res.json();
         setOwnerSession(data);
+        if (!data.authenticated && token) {
+          localStorage.removeItem('anivault_owner_session_token');
+        }
       }
     } catch (err) {
       console.error('Failed to check owner session', err);
@@ -95,7 +98,6 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
     } catch (err) {
       console.error('Failed to log out owner', err);
     }
-    logoutToGuest();
   };
 
   const [usernameError, setUsernameError] = useState<string | null>(null);
@@ -144,8 +146,8 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
     setThemeMode(mode);
   };
 
-  const isOwner = account.provider === 'owner' || (ownerSession?.authenticated && ownerSession?.owner?.role === 'owner');
-  const ownerUsername = ownerSession?.owner?.username || account.username || 'Owner';
+  const isOwner = ownerSession?.authenticated && ownerSession?.owner?.role === 'owner';
+  const ownerUsername = ownerSession?.owner?.username;
 
   return (
     <div
