@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { UserAccount, UserData, ThemeMode } from '../types.ts';
+import { UserAccount, UserData } from '../types.ts';
 import {
   getCurrentAccount,
   getUserData,
@@ -10,21 +10,43 @@ import {
   setThemeMode,
   addToHistory,
   clearHistory,
-  logoutToGuest
+  logoutFromServer,
+  syncWithServerSession
 } from '../utils/userStorage.ts';
 
+/**
+ * Keeps the rendered account synchronized with the server-validated session.
+ * The server remains authoritative; localStorage is only an initialization hint.
+ */
 export function useUserData() {
-  const [account, setAccount] = useState<UserAccount>(getCurrentAccount());
-  const [userData, setUserData] = useState<UserData>(getUserData());
+  const [account, setAccount] = useState<UserAccount>(() => getCurrentAccount());
+  const [userData, setUserData] = useState<UserData>(() => getUserData());
 
   useEffect(() => {
+    let mounted = true;
+
     const update = () => {
-      setAccount(getCurrentAccount());
-      setUserData(getUserData());
+      if (!mounted) return;
+      const nextAccount = getCurrentAccount();
+      setAccount(nextAccount);
+      setUserData(getUserData(nextAccount.id));
     };
-    update();
+
     const unsubscribe = subscribeUserStorage(update);
-    return () => unsubscribe();
+    update();
+
+    // Revalidate persisted cookies/tokens after the app has mounted. A network
+    // failure is not treated as logout; only an explicit server rejection is.
+    syncWithServerSession()
+      .then(() => update())
+      .catch(() => {
+        // Keep the existing state during transient startup/network failures.
+      });
+
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
   }, []);
 
   const isFavorite = (animeId: string) => userData.favorites.includes(animeId);
@@ -43,7 +65,7 @@ export function useUserData() {
     addToHistory,
     clearHistory,
     setTheme: setThemeMode,
-    logout: logoutToGuest,
+    logout: logoutFromServer,
     isGuest: account.provider === 'guest'
   };
 }
