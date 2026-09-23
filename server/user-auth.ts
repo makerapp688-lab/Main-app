@@ -6,7 +6,8 @@ import {
   getEmailConfigStatus,
   generateVerificationCode,
   sendVerificationEmail,
-  testEmailTransport
+  testEmailTransport,
+  checkServerSecretsDiagnostic
 } from './email-service.js';
 import { validateOwnerSession } from './owner-auth.js';
 
@@ -26,6 +27,7 @@ export interface UserRecord {
   email: string;
   username: string;
   name?: string;
+  avatar?: string;
   passwordHash?: string;
   salt?: string;
   provider: 'email' | 'google' | 'apple';
@@ -159,21 +161,11 @@ export function isUsernameAvailable(
     if (excludeUserId && user.id === excludeUserId) {
       continue;
     }
+    if (excludeEmail && user.email.toLowerCase() === excludeEmail.toLowerCase()) {
+      continue; // Allow same username for accounts registered under the same email address
+    }
     if (normalizeUsername(user.username) === normalized) {
       return { available: false, reason: 'Username already taken.' };
-    }
-  }
-
-  // Check active pending verification signups
-  const now = Date.now();
-  for (const [tempEmail, temp] of Object.entries(tempVerificationsCache)) {
-    if (temp.expiresAt > now) {
-      if (excludeEmail && tempEmail.toLowerCase() === excludeEmail.toLowerCase()) {
-        continue;
-      }
-      if (normalizeUsername(temp.username) === normalized) {
-        return { available: false, reason: 'Username already taken.' };
-      }
     }
   }
 
@@ -225,6 +217,11 @@ function loadUsersData() {
   try {
     if (fs.existsSync(USERS_ACCOUNTS_PATH)) {
       usersCache = JSON.parse(fs.readFileSync(USERS_ACCOUNTS_PATH, 'utf-8'));
+      for (const user of Object.values(usersCache)) {
+        if (user.email) {
+          user.email = user.email.trim().toLowerCase();
+        }
+      }
     }
     if (fs.existsSync(USERS_TEMP_VERIFICATIONS_PATH)) {
       tempVerificationsCache = JSON.parse(fs.readFileSync(USERS_TEMP_VERIFICATIONS_PATH, 'utf-8'));
@@ -412,6 +409,7 @@ function sanitizeUser(u: UserRecord) {
     email: u.email,
     username: u.username,
     name: u.name || u.username,
+    avatar: u.avatar || undefined,
     provider: u.provider,
     isVerified: u.isVerified,
     role: u.role || 'user',
@@ -454,6 +452,27 @@ export function getAppleConfigStatus(): { configured: boolean; missing: string[]
   };
 }
 
+interface DeletionVerificationRecord {
+  userId: string;
+  email: string;
+  codeHash: string;
+  expiresAt: number;
+  attempts: number;
+  resendCount: number;
+  lastResendAt: number;
+  verifiedToken?: string;
+  tokenExpiresAt?: number;
+}
+
+let deletionVerificationsCache: Record<string, DeletionVerificationRecord> = {};
+
+function maskEmail(email?: string): string {
+  if (!email || !email.includes('@')) return 'your email';
+  const [user, domain] = email.split('@');
+  if (user.length <= 2) return `${user[0]}***@${domain}`;
+  return `${user[0]}***${user[user.length - 1]}@${domain}`;
+}
+
 export function createUserAuthRouter() {
   const router = express.Router();
 
@@ -481,6 +500,17 @@ export function createUserAuthRouter() {
     res.json({
       providers: statusObj,
       ...statusObj
+    });
+  });
+
+  // 1a2. AI Studio Server Secrets Diagnostic (Reports ONLY 'configured' | 'missing' - never secrets)
+  router.get('/email-status', (req: Request, res: Response) => {
+    const secretsDiag = checkServerSecretsDiagnostic();
+    const configStatus = getEmailConfigStatus();
+    res.json({
+      configured: configStatus.configured,
+      diagnostic: secretsDiag,
+      ...secretsDiag
     });
   });
 
@@ -531,6 +561,31 @@ export function createUserAuthRouter() {
         return;
       }
 
+      // 1b. Max 2 accounts per email & distinct password check
+      const existingAccounts = Object.values(usersCache).filter(
+        u => u.email.toLowerCase() === normalizedEmail && u.isVerified
+      );
+
+      if (existingAccounts.length >= 2) {
+        res.status(400).json({
+          error: 'An account limit of 2 accounts per email address has been reached for this email.'
+        });
+        return;
+      }
+
+      if (existingAccounts.length === 1) {
+        const existingAcc = existingAccounts[0];
+        if (existingAcc.passwordHash && existingAcc.salt) {
+          const isSamePassword = verifyPassword(password, existingAcc.passwordHash, existingAcc.salt);
+          if (isSamePassword) {
+            res.status(400).json({
+              error: 'An account with this email already exists with this password. Please choose a different password for your second account.'
+            });
+            return;
+          }
+        }
+      }
+
       // 2. Username uniqueness and format validation
       if (!username || typeof username !== 'string') {
         res.status(400).json({ error: 'Username is required.' });
@@ -548,15 +603,6 @@ export function createUserAuthRouter() {
       // 3. Password validation
       if (!password || typeof password !== 'string' || password.length < 8) {
         res.status(400).json({ error: 'Password must be at least 8 characters long.' });
-        return;
-      }
-
-      // Check if verified account already exists for this email
-      const existingUser = Object.values(usersCache).find(u => u.email === normalizedEmail && u.isVerified);
-      if (existingUser) {
-        res.status(400).json({
-          error: 'An account with this email already exists. Please sign in.'
-        });
         return;
       }
 
@@ -587,7 +633,7 @@ export function createUserAuthRouter() {
       // Generate verification code
       const { code, codeHash } = generateVerificationCode();
       const recipientDomain = normalizedEmail.includes('@') ? '@' + normalizedEmail.split('@')[1] : 'recipient';
-      console.log(`[EMAIL_DIAGNOSTIC] OTP_GENERATED: true, length=6, domain=${recipientDomain}`);
+      console.log(`[EMAIL_DIAGNOSTIC] OTP generated: 6-digit secure code, domain=${recipientDomain}`);
       const { hash: passwordHash, salt } = hashPassword(password);
 
       const tempRec: TempUserVerification = {
@@ -604,7 +650,7 @@ export function createUserAuthRouter() {
 
       tempVerificationsCache[normalizedEmail] = tempRec;
       saveTempVerifications();
-      console.log(`[EMAIL_DIAGNOSTIC] OTP_STORAGE_SUCCESS: true, domain=${recipientDomain}, expiresAt=+10m`);
+      console.log(`[EMAIL_DIAGNOSTIC] OTP stored: recipientDomain=${recipientDomain}, expiresAt=+10m`);
 
       // Dispatch verification email
       try {
@@ -617,7 +663,7 @@ export function createUserAuthRouter() {
         console.error('[UserRegisterInit] Failed to send email:', mailErr.message);
         delete tempVerificationsCache[normalizedEmail];
         saveTempVerifications();
-        const safeError = mailErr.message || 'Email delivery failed.';
+        const safeError = mailErr.message || 'Verification email could not be sent. Please try again.';
         res.status(503).json({
           error: safeError,
           code: 'EMAIL_SEND_FAILED'
@@ -695,13 +741,13 @@ export function createUserAuthRouter() {
         return;
       }
 
-      // Final check for username availability before committing
-      const finalAvailCheck = isUsernameAvailable(tempRec.username);
+      // Final check for username availability before committing (excluding this pending registration's own reservation)
+      const finalAvailCheck = isUsernameAvailable(tempRec.username, undefined, normalizedEmail);
       if (!finalAvailCheck.available) {
         delete tempVerificationsCache[normalizedEmail];
         saveTempVerifications();
         res.status(409).json({
-          error: 'Username was claimed during the verification window. Please register again with a new username.'
+          error: finalAvailCheck.reason || 'Username was claimed during the verification window. Please register again with a new username.'
         });
         return;
       }
@@ -809,14 +855,14 @@ export function createUserAuthRouter() {
 
       const { code, codeHash } = generateVerificationCode();
       const recipientDomain = normalizedEmail.includes('@') ? '@' + normalizedEmail.split('@')[1] : 'recipient';
-      console.log(`[EMAIL_DIAGNOSTIC] OTP_GENERATED: true, length=6, domain=${recipientDomain} (RESEND)`);
+      console.log(`[EMAIL_DIAGNOSTIC] OTP generated: 6-digit secure code, domain=${recipientDomain} (RESEND)`);
       tempRec.codeHash = codeHash;
       tempRec.expiresAt = now + 10 * 60 * 1000;
       tempRec.attempts = 0;
       tempRec.resendCount += 1;
       tempRec.lastResendAt = now;
       saveTempVerifications();
-      console.log(`[EMAIL_DIAGNOSTIC] OTP_STORAGE_SUCCESS: true, domain=${recipientDomain}, resendCount=${tempRec.resendCount}`);
+      console.log(`[EMAIL_DIAGNOSTIC] OTP stored: recipientDomain=${recipientDomain}, previous code invalidated, resendCount=${tempRec.resendCount}`);
 
       try {
         await sendVerificationEmail(
@@ -826,7 +872,7 @@ export function createUserAuthRouter() {
         );
       } catch (mailErr: any) {
         console.error('[UserResendCode] Failed to send email:', mailErr.message);
-        const safeError = mailErr.message || 'Email delivery failed.';
+        const safeError = mailErr.message || 'Verification email could not be sent. Please try again.';
         res.status(503).json({
           error: safeError,
           code: 'EMAIL_SEND_FAILED'
@@ -850,18 +896,53 @@ export function createUserAuthRouter() {
   // 5. Normal User Login
   router.post('/login', async (req: Request, res: Response) => {
     try {
-      const { email, password } = req.body;
+      const { email, password, username, accountId } = req.body;
 
-      if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
-        res.status(400).json({ error: 'Email and password are required.' });
+      if ((!email && !username && !accountId) || !password || typeof password !== 'string') {
+        res.status(400).json({ error: 'Email/Username and password are required.' });
         return;
       }
 
-      const normalizedEmail = email.trim().toLowerCase();
-      const user = Object.values(usersCache).find(u => u.email === normalizedEmail);
+      let user: UserRecord | undefined;
+
+      // 1. If explicit accountId is provided (e.g. from switcher)
+      if (accountId && typeof accountId === 'string') {
+        user = usersCache[accountId];
+      }
+
+      // 2. If explicit username is provided
+      if (!user && username && typeof username === 'string') {
+        user = Object.values(usersCache).find(u => normalizeUsername(u.username) === normalizeUsername(username));
+      }
+
+      // 3. If email/identifier is provided
+      if (!user && email && typeof email === 'string') {
+        const input = email.trim();
+        const normalizedInput = input.toLowerCase();
+
+        // 3a. Check if the input is actually a username
+        const userByUsername = Object.values(usersCache).find(
+          u => normalizeUsername(u.username) === normalizeUsername(input)
+        );
+
+        if (userByUsername && userByUsername.passwordHash && userByUsername.salt && verifyPassword(password, userByUsername.passwordHash, userByUsername.salt)) {
+          user = userByUsername;
+        } else {
+          // 3b. Match by email. Identify which Account matches the password provided
+          const candidateUsers = Object.values(usersCache).filter(
+            u => u.email.toLowerCase() === normalizedInput && u.isVerified
+          );
+
+          if (candidateUsers.length > 0) {
+            user = candidateUsers.find(
+              cand => cand.passwordHash && cand.salt && verifyPassword(password, cand.passwordHash, cand.salt)
+            );
+          }
+        }
+      }
 
       if (!user) {
-        res.status(401).json({ error: 'Invalid email or password.' });
+        res.status(401).json({ error: 'Invalid email, username, or password.' });
         return;
       }
 
@@ -882,7 +963,7 @@ export function createUserAuthRouter() {
 
       const isValid = verifyPassword(password, user.passwordHash, user.salt);
       if (!isValid) {
-        res.status(401).json({ error: 'Invalid email or password.' });
+        res.status(401).json({ error: 'Invalid email/username or password.' });
         return;
       }
 
@@ -1027,7 +1108,8 @@ export function createUserAuthRouter() {
     }
 
     // Load account record from permanent account storage
-    let user = usersCache[session.userId] || Object.values(usersCache).find(u => u.email === session.email);
+    const cleanSessionEmail = session.email ? session.email.trim().toLowerCase() : '';
+    let user = usersCache[session.userId] || Object.values(usersCache).find(u => u.email && u.email.trim().toLowerCase() === cleanSessionEmail);
     if (!user) {
       console.log(' - User account record missing from usersCache. Triggering self-healing account recreation...');
       const isoNow = new Date().toISOString();
@@ -1125,6 +1207,312 @@ export function createUserAuthRouter() {
     });
   });
 
+  // 9. Update Normal User Profile Photo (Avatar)
+  router.post('/user/avatar', (req: Request, res: Response) => {
+    const cookies = parseCookies(req);
+    const authHeader = req.headers.authorization;
+    const bearerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+    const customHeader = req.headers['x-anivault-user-session'] as string;
+    const sessionId = cookies.anivault_user_session || bearerToken || customHeader;
+
+    if (!sessionId) {
+      res.status(401).json({ error: 'Unauthorized.' });
+      return;
+    }
+
+    const session = activeUserSessions.get(sessionId);
+    if (!session || session.expiresAt < Date.now()) {
+      res.status(401).json({ error: 'Session expired.' });
+      return;
+    }
+
+    const user = usersCache[session.userId];
+    if (!user) {
+      res.status(404).json({ error: 'User record not found.' });
+      return;
+    }
+
+    const { avatar } = req.body;
+    user.avatar = typeof avatar === 'string' && avatar.trim() ? avatar : undefined;
+    user.updatedAt = new Date().toISOString();
+    saveUsers();
+
+    res.json({
+      success: true,
+      message: 'Avatar updated successfully.',
+      avatar: user.avatar
+    });
+  });
+
+  // 10. Seamless Switch to Normal User Account
+  router.post('/switch', (req: Request, res: Response) => {
+    const { accountId } = req.body;
+    if (!accountId) {
+      res.status(400).json({ error: 'Account ID is required.' });
+      return;
+    }
+
+    const user = usersCache[accountId] || Object.values(usersCache).find(u => u.id === accountId);
+    if (!user) {
+      res.status(404).json({ error: 'Account not found.' });
+      return;
+    }
+
+    const sessionExpires = Date.now() + 30 * 24 * 60 * 60 * 1000;
+    const sessionId = generateSignedSessionToken(user.id, user.email, user.username, 'user', user.provider || 'email', sessionExpires);
+    const sessionData: UserSession = {
+      sessionId,
+      userId: user.id,
+      email: user.email,
+      username: user.username,
+      provider: user.provider,
+      role: 'user',
+      createdAt: Date.now(),
+      expiresAt: sessionExpires
+    };
+
+    activeUserSessions.set(sessionId, sessionData);
+    saveUserSessions();
+
+    setSessionCookie(res, 'anivault_user_session', sessionId, 2592000, req);
+
+    res.json({
+      success: true,
+      message: 'Switched to user account successfully.',
+      user: sanitizeUser(user),
+      sessionToken: sessionId
+    });
+  });
+
+  // 8b. Delete Account - Step 1: Request Deletion OTP
+  router.post('/delete-account-init', async (req: Request, res: Response) => {
+    try {
+      const { accountId, email } = req.body;
+      let user: UserRecord | undefined;
+
+      if (accountId && usersCache[accountId]) {
+        user = usersCache[accountId];
+      } else if (email && typeof email === 'string') {
+        const norm = email.trim().toLowerCase();
+        user = Object.values(usersCache).find(u => u.email.toLowerCase() === norm);
+      }
+
+      if (!user) {
+        const cookies = parseCookies(req);
+        const authHeader = req.headers.authorization;
+        const bearerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+        const userHeader = req.headers['x-anivault-user-session'] as string;
+        const sessionId = cookies.anivault_user_session || userHeader || bearerToken;
+        if (sessionId) {
+          const session = activeUserSessions.get(sessionId);
+          if (session) user = usersCache[session.userId];
+        }
+      }
+
+      if (!user) {
+        res.status(404).json({ error: 'User account not found.' });
+        return;
+      }
+
+      if (user.role === ('owner' as any) || user.id === 'usr_owner') {
+        res.status(403).json({ error: 'The permanent Owner account cannot be deleted from normal account settings.' });
+        return;
+      }
+
+      const existingRecord = deletionVerificationsCache[user.id];
+      const now = Date.now();
+      if (existingRecord && existingRecord.lastResendAt && now - existingRecord.lastResendAt < 45000) {
+        const waitSec = Math.ceil((45000 - (now - existingRecord.lastResendAt)) / 1000);
+        res.status(429).json({ error: `Please wait ${waitSec} seconds before requesting a new code.` });
+        return;
+      }
+
+      const { code, codeHash } = generateVerificationCode();
+
+      deletionVerificationsCache[user.id] = {
+        userId: user.id,
+        email: user.email,
+        codeHash,
+        expiresAt: now + 10 * 60 * 1000,
+        attempts: 0,
+        resendCount: (existingRecord?.resendCount || 0) + 1,
+        lastResendAt: now
+      };
+
+      try {
+        await sendVerificationEmail(
+          user.email,
+          code,
+          'Verify your AniVault account deletion'
+        );
+      } catch (mailErr: any) {
+        delete deletionVerificationsCache[user.id];
+        res.status(503).json({ error: mailErr.message || 'Failed to send verification email. Please try again.' });
+        return;
+      }
+
+      res.json({
+        success: true,
+        message: 'Verification code sent to your email.',
+        maskedEmail: maskEmail(user.email)
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Internal server error.' });
+    }
+  });
+
+  // 8c. Delete Account - Step 2: Verify Deletion OTP
+  router.post('/delete-account-verify', (req: Request, res: Response) => {
+    try {
+      const { accountId, code } = req.body;
+      if (!accountId || !code) {
+        res.status(400).json({ error: 'Account ID and verification code are required.' });
+        return;
+      }
+
+      const record = deletionVerificationsCache[accountId];
+      if (!record) {
+        res.status(400).json({ error: 'No active deletion request found. Please request a new code.' });
+        return;
+      }
+
+      const now = Date.now();
+      if (record.expiresAt < now) {
+        delete deletionVerificationsCache[accountId];
+        res.status(400).json({ error: 'Verification code expired. Please request a new one.' });
+        return;
+      }
+
+      record.attempts = (record.attempts || 0) + 1;
+      if (record.attempts > 5) {
+        delete deletionVerificationsCache[accountId];
+        res.status(429).json({ error: 'Too many incorrect attempts. Please request a new verification code.' });
+        return;
+      }
+
+      const inputHash = crypto.createHash('sha256').update(code.trim()).digest('hex');
+      if (inputHash !== record.codeHash) {
+        res.status(400).json({ error: 'Incorrect verification code.' });
+        return;
+      }
+
+      const deletionToken = crypto.randomBytes(24).toString('hex');
+      record.verifiedToken = deletionToken;
+      record.tokenExpiresAt = now + 5 * 60 * 1000;
+
+      res.json({
+        success: true,
+        message: 'Code verified successfully.',
+        deletionToken
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Internal verification error.' });
+    }
+  });
+
+  // 8d. Delete Account - Step 3: Resend Deletion OTP
+  router.post('/delete-account-resend', async (req: Request, res: Response) => {
+    try {
+      const { accountId } = req.body;
+      if (!accountId || !usersCache[accountId]) {
+        res.status(404).json({ error: 'Account not found.' });
+        return;
+      }
+
+      const user = usersCache[accountId];
+      const existingRecord = deletionVerificationsCache[user.id];
+      const now = Date.now();
+
+      if (existingRecord && existingRecord.lastResendAt && now - existingRecord.lastResendAt < 45000) {
+        const waitSec = Math.ceil((45000 - (now - existingRecord.lastResendAt)) / 1000);
+        res.status(429).json({ error: `Please wait ${waitSec} seconds before requesting a new code.` });
+        return;
+      }
+
+      const { code, codeHash } = generateVerificationCode();
+
+      deletionVerificationsCache[user.id] = {
+        userId: user.id,
+        email: user.email,
+        codeHash,
+        expiresAt: now + 10 * 60 * 1000,
+        attempts: 0,
+        resendCount: (existingRecord?.resendCount || 0) + 1,
+        lastResendAt: now
+      };
+
+      await sendVerificationEmail(
+        user.email,
+        code,
+        'Verify your AniVault account deletion'
+      );
+
+      res.json({
+        success: true,
+        message: 'New verification code sent.',
+        maskedEmail: maskEmail(user.email)
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to resend code.' });
+    }
+  });
+
+  // 8e. Delete Account - Step 4: Final Confirmation & Complete Removal
+  router.post('/delete-account-confirm', (req: Request, res: Response) => {
+    try {
+      const { accountId, deletionToken } = req.body;
+      if (!accountId || !deletionToken) {
+        res.status(400).json({ error: 'Account ID and deletion token are required.' });
+        return;
+      }
+
+      const record = deletionVerificationsCache[accountId];
+      if (!record || record.verifiedToken !== deletionToken || !record.tokenExpiresAt || record.tokenExpiresAt < Date.now()) {
+        res.status(403).json({ error: 'Deletion authorization has expired or is invalid. Please verify again.' });
+        return;
+      }
+
+      const user = usersCache[accountId];
+      if (!user) {
+        delete deletionVerificationsCache[accountId];
+        res.status(404).json({ error: 'Account not found or already deleted.' });
+        return;
+      }
+
+      if (user.role === ('owner' as any) || user.id === 'usr_owner') {
+        res.status(403).json({ error: 'The permanent Owner account cannot be deleted.' });
+        return;
+      }
+
+      // 1. Delete user record permanently
+      delete usersCache[accountId];
+      saveUsers();
+
+      // 2. Remove all active sessions for this user
+      for (const [sessionId, session] of activeUserSessions.entries()) {
+        if (session.userId === accountId) {
+          activeUserSessions.delete(sessionId);
+        }
+      }
+      saveUserSessions();
+
+      // 3. Clear deletion record
+      delete deletionVerificationsCache[accountId];
+
+      // 4. Clear cookie
+      setSessionCookie(res, 'anivault_user_session', '', 0, req);
+
+      console.log(`[UserAuth DB] Account permanently deleted: ${accountId} (${user.username}, ${user.email})`);
+
+      res.json({
+        success: true,
+        message: 'Your account has been permanently deleted.'
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to delete account.' });
+    }
+  });
+
   // Helper to determine base URL for redirect callbacks
   function getBaseAppUrl(req: Request, clientOrigin?: string): string {
     if (clientOrigin && clientOrigin.startsWith('http')) {
@@ -1187,6 +1575,7 @@ export function createUserAuthRouter() {
 
     const renderHtmlResponse = (success: boolean, payload: any) => {
       res.setHeader('Content-Type', 'text/html');
+      const isUnlinked = payload?.needsAccountSelection;
       return res.send(`
         <!DOCTYPE html>
         <html>
@@ -1196,26 +1585,26 @@ export function createUserAuthRouter() {
             <style>
               body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #090d16; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
               .card { background: #0f172a; border: 1px solid #1e293b; border-radius: 16px; padding: 32px; max-width: 440px; text-align: center; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); }
-              h2 { margin-top: 0; color: ${success ? '#34d399' : '#f87171'}; font-size: 20px; }
+              h2 { margin-top: 0; color: ${success ? '#34d399' : (isUnlinked ? '#fbbf24' : '#f87171')}; font-size: 20px; }
               p { color: #94a3b8; font-size: 14px; line-height: 1.5; }
               .btn { margin-top: 20px; display: inline-block; padding: 10px 24px; background: #e11d48; color: #fff; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 13px; cursor: pointer; border: none; }
             </style>
           </head>
           <body>
             <div class="card">
-              <h2>${success ? 'Sign-In Successful' : 'Google Authentication Notice'}</h2>
-              <p>${success ? 'Your AniVault account is verified. You can close this window.' : (payload?.error || 'Authentication could not be completed.')}</p>
+              <h2>${success ? 'Sign-In Successful' : (isUnlinked ? 'No Account Found' : 'Google Authentication Notice')}</h2>
+              <p>${success ? 'Your AniVault account is verified. You can close this window.' : (isUnlinked ? `No account found for this Google account (${payload.googleEmail}). Please use existing account or create account in AniVault.` : (payload?.error || 'Authentication could not be completed.'))}</p>
               <button class="btn" onclick="window.close()">Close Window</button>
             </div>
             <script>
               try {
                 if (window.opener) {
                   window.opener.postMessage({
-                    type: '${success ? 'ANIVAULT_OAUTH_SUCCESS' : 'ANIVAULT_OAUTH_ERROR'}',
+                    type: '${success ? 'ANIVAULT_OAUTH_SUCCESS' : (isUnlinked ? 'ANIVAULT_GOOGLE_UNLINKED' : 'ANIVAULT_OAUTH_ERROR')}',
                     provider: 'google',
-                    ${success ? `user: ${JSON.stringify(payload.user)}, sessionToken: ${JSON.stringify(payload.sessionToken)}` : `error: ${JSON.stringify(payload.error)}`}
+                    ${success ? `user: ${JSON.stringify(payload.user)}, sessionToken: ${JSON.stringify(payload.sessionToken)}` : (isUnlinked ? `googleEmail: ${JSON.stringify(payload.googleEmail)}, googleSub: ${JSON.stringify(payload.googleSub)}, googleName: ${JSON.stringify(payload.googleName)}` : `error: ${JSON.stringify(payload.error)}`)}
                   }, '*');
-                  setTimeout(() => { window.close(); }, 1200);
+                  setTimeout(() => { window.close(); }, ${isUnlinked ? '2500' : '1200'});
                 }
               } catch (e) {
                 console.error(e);
@@ -1302,27 +1691,15 @@ export function createUserAuthRouter() {
         }
         user.lastLoginAt = isoNow;
         user.updatedAt = isoNow;
+        saveUsers();
       } else {
-        // Create new verified normal user with guaranteed unique username
-        const newId = `usr_${crypto.randomBytes(8).toString('hex')}`;
-        const uniqueUsername = generateUniqueUsername(googleName || 'GoogleUser');
-        user = {
-          id: newId,
-          email: googleEmail,
-          username: uniqueUsername,
-          name: googleName,
-          provider: 'google',
-          googleId: googleSub,
-          isVerified: true,
-          role: 'user',
-          createdAt: isoNow,
-          updatedAt: isoNow,
-          lastLoginAt: isoNow
-        };
-        usersCache[newId] = user;
+        return renderHtmlResponse(false, {
+          needsAccountSelection: true,
+          googleEmail,
+          googleSub,
+          googleName
+        });
       }
-
-      saveUsers();
 
       // Create session
       const now = Date.now();
@@ -1349,6 +1726,104 @@ export function createUserAuthRouter() {
       console.error('[GoogleCallback Error]', err);
       return renderHtmlResponse(false, { error: err.message || 'Internal error processing Google authentication.' });
     }
+  });
+
+  // Google Force Create Account
+  router.post('/google/force-create', (req: Request, res: Response) => {
+    const { googleSub, googleEmail, googleName } = req.body;
+    if (!googleSub || !googleEmail) {
+      res.status(400).json({ error: 'Google identity required.' });
+      return;
+    }
+
+    let user = Object.values(usersCache).find(u => u.googleId === googleSub || u.email.toLowerCase() === googleEmail.toLowerCase());
+    const isoNow = new Date().toISOString();
+
+    if (user) {
+      if (!user.googleId) user.googleId = googleSub;
+    } else {
+      const newId = `usr_${crypto.randomBytes(8).toString('hex')}`;
+      const uniqueUsername = generateUniqueUsername(googleName || 'GoogleUser');
+      user = {
+        id: newId,
+        email: googleEmail,
+        username: uniqueUsername,
+        name: googleName || uniqueUsername,
+        provider: 'google',
+        googleId: googleSub,
+        isVerified: true,
+        role: 'user',
+        createdAt: isoNow,
+        updatedAt: isoNow,
+        lastLoginAt: isoNow
+      };
+      usersCache[newId] = user;
+      saveUsers();
+    }
+
+    const sessionExpires = Date.now() + 30 * 24 * 60 * 60 * 1000;
+    const sessionId = generateSignedSessionToken(user.id, user.email, user.username, 'user', 'google', sessionExpires);
+    const sessionData: UserSession = {
+      sessionId,
+      userId: user.id,
+      email: user.email,
+      username: user.username,
+      provider: 'google',
+      role: 'user',
+      createdAt: Date.now(),
+      expiresAt: sessionExpires
+    };
+    activeUserSessions.set(sessionId, sessionData);
+    saveUserSessions();
+    setSessionCookie(res, 'anivault_user_session', sessionId, 2592000, req);
+
+    res.json({ success: true, user: sanitizeUser(user), sessionToken: sessionId });
+  });
+
+  // Google Link Existing Account
+  router.post('/google/link-existing', async (req: Request, res: Response) => {
+    const { googleSub, googleEmail, email, password } = req.body;
+    if (!googleSub || !googleEmail || !email || !password) {
+      res.status(400).json({ error: 'Google identity and existing account credentials required.' });
+      return;
+    }
+
+    const normEmail = email.trim().toLowerCase();
+    const existingUser = Object.values(usersCache).find(u => u.email.toLowerCase() === normEmail);
+    if (!existingUser) {
+      res.status(404).json({ error: 'Existing account not found with this email.' });
+      return;
+    }
+
+    if (existingUser.passwordHash && existingUser.salt) {
+      const isValid = verifyPassword(password, existingUser.passwordHash, existingUser.salt);
+      if (!isValid) {
+        res.status(401).json({ error: 'Invalid password for existing account.' });
+        return;
+      }
+    }
+
+    existingUser.googleId = googleSub;
+    existingUser.updatedAt = new Date().toISOString();
+    saveUsers();
+
+    const sessionExpires = Date.now() + 30 * 24 * 60 * 60 * 1000;
+    const sessionId = generateSignedSessionToken(existingUser.id, existingUser.email, existingUser.username, 'user', existingUser.provider || 'google', sessionExpires);
+    const sessionData: UserSession = {
+      sessionId,
+      userId: existingUser.id,
+      email: existingUser.email,
+      username: existingUser.username,
+      provider: existingUser.provider || 'google',
+      role: 'user',
+      createdAt: Date.now(),
+      expiresAt: sessionExpires
+    };
+    activeUserSessions.set(sessionId, sessionData);
+    saveUserSessions();
+    setSessionCookie(res, 'anivault_user_session', sessionId, 2592000, req);
+
+    res.json({ success: true, user: sanitizeUser(existingUser), sessionToken: sessionId });
   });
 
   // 11. Apple Sign-In - Generate Authorization URL

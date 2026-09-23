@@ -5,10 +5,12 @@ import {
   Bookmark,
   Check,
   Scale,
-  User
+  User,
+  Shield
 } from 'lucide-react';
 import { RARETOON_BASE_URL, RARETOON_PROVIDER_NAME } from '../utils/provider.ts';
 import { useUserData } from '../hooks/useUserData.ts';
+import { getAccountAvatar } from '../utils/userStorage.ts';
 import { AniVaultLogo } from './AniVaultLogo.tsx';
 
 export type NavTabType = 'browse' | 'mylist' | 'completed' | 'compare' | 'account' | 'watchlist' | 'favorites';
@@ -130,7 +132,24 @@ export const Navbar: React.FC<NavbarProps> = ({
                 : 'text-slate-300 dark:text-slate-300 light:text-slate-700 hover:text-white hover:bg-slate-800 dark:hover:bg-slate-800 light:hover:bg-slate-200'
             }`}
           >
-            <User className="w-3.5 h-3.5" />
+          {(() => {
+            const isOwner = account.role === 'owner';
+            const isGuest = account.id === 'guest_user' || account.provider === 'guest';
+            const avatarUrl = isOwner ? getAccountAvatar('usr_owner') : (!isGuest ? getAccountAvatar(account.id) : null);
+            return avatarUrl ? (
+              <img
+                src={avatarUrl}
+                alt="DP"
+                className={`w-4 h-4 rounded-full object-cover ${
+                  isOwner ? 'border border-amber-400' : 'border border-white/50'
+                }`}
+              />
+            ) : isOwner ? (
+              <Shield className="w-3.5 h-3.5 text-amber-400" />
+            ) : (
+              <User className="w-3.5 h-3.5" />
+            );
+          })()}
             <span>Account</span>
           </button>
         </div>

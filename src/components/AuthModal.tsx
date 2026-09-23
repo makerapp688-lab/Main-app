@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { UserAccount } from '../types.ts';
 import { AniVaultLogo } from './AniVaultLogo.tsx';
+import { OtpInput } from './OtpInput.tsx';
 import {
   getCurrentAccount,
   logoutToGuest,
@@ -34,13 +35,16 @@ import {
   getGuestData,
   getUserData,
   getSavedAccounts,
-  switchAccount
+  switchAccount,
+  getAccountAvatar
 } from '../utils/userStorage.ts';
 
 interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
   onAccountChanged?: () => void;
+  initialMode?: 'login' | 'register';
+  initialView?: 'overview' | 'email' | 'edit_username';
 }
 
 interface ProviderStatus {
@@ -52,7 +56,9 @@ interface ProviderStatus {
 export const AuthModal: React.FC<AuthModalProps> = ({
   isOpen,
   onClose,
-  onAccountChanged
+  onAccountChanged,
+  initialMode,
+  initialView
 }) => {
   const currentAccount = getCurrentAccount();
   const isGuest = currentAccount.provider === 'guest';
@@ -82,6 +88,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSuccess, setAuthSuccess] = useState<string | null>(null);
+
   const [configNotice, setConfigNotice] = useState<{ provider: 'google' | 'apple' | 'email'; message: string } | null>(null);
   const [showMigratePrompt, setShowMigratePrompt] = useState(false);
   const [pendingAccount, setPendingAccount] = useState<UserAccount | null>(null);
@@ -166,8 +173,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setRegisterStep('form');
       setVerificationCode('');
       setShowPassword(false);
+      if (initialMode) {
+        setAuthMode(initialMode);
+      }
+      if (initialView) {
+        setActiveView(initialView);
+      } else if (initialMode) {
+        setActiveView('email');
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, initialMode, initialView]);
 
   // Listen for OAuth postMessage callbacks from Google / Apple popups
   useEffect(() => {
@@ -532,9 +547,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           <div className="p-4 bg-slate-950/80 dark:bg-slate-950/80 light:bg-slate-50 border border-slate-800 dark:border-slate-800 light:border-slate-200 rounded-xl space-y-3">
             <div className="flex items-start justify-between">
               <div className="flex items-center gap-2.5">
-                <div className="w-11 h-11 rounded-full bg-gradient-to-br from-rose-500 to-pink-600 border border-rose-400/40 flex items-center justify-center text-white font-black text-sm shadow-md">
-                  {(currentAccount.username || currentAccount.name).charAt(0).toUpperCase()}
-                </div>
+                {(() => {
+                  const isOwner = currentAccount.role === 'owner';
+                  const isGuestUser = isGuest || currentAccount.id === 'guest_user' || currentAccount.provider === 'guest';
+                  const avatarUrl = isOwner ? getAccountAvatar('usr_owner') : (!isGuestUser ? getAccountAvatar(currentAccount.id) : null);
+                  return avatarUrl ? (
+                    <div className="w-11 h-11 rounded-full overflow-hidden border border-rose-400/40 shrink-0 shadow-md">
+                      <img src={avatarUrl} alt="DP" className="w-full h-full object-cover rounded-full" />
+                    </div>
+                  ) : (
+                    <div className="w-11 h-11 rounded-full bg-gradient-to-br from-rose-500 to-pink-600 border border-rose-400/40 flex items-center justify-center text-white font-black text-sm shadow-md">
+                      {(currentAccount.username || currentAccount.name || 'A').charAt(0).toUpperCase()}
+                    </div>
+                  );
+                })()}
                 <div>
                   <div className="flex items-center gap-1.5">
                     <span className="text-sm font-bold text-white dark:text-white light:text-slate-900">
@@ -581,6 +607,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             {/* Quick edit username form */}
             {activeView === 'edit_username' && (
               <form
+                noValidate
                 onSubmit={handleUpdateUsernameSubmit}
                 className="pt-2 border-t border-slate-800 dark:border-slate-800 light:border-slate-200 space-y-2"
               >
@@ -698,69 +725,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 Sign In or Register
               </div>
 
-              {/* 3P OAuth Buttons: Real Google & Apple flows */}
-              <div className="grid grid-cols-2 gap-2.5">
-                <button
-                  type="button"
-                  id="btn-auth-google"
-                  onClick={() => handleRealOAuthAttempt('google')}
-                  className="py-2.5 px-3 rounded-xl border bg-slate-800/90 hover:bg-slate-700 dark:bg-slate-800/90 dark:hover:bg-slate-700 light:bg-slate-100 light:hover:bg-slate-200 border-slate-700 dark:border-slate-700 light:border-slate-300 text-white dark:text-white light:text-slate-900 text-xs font-semibold flex items-center justify-center gap-2 transition-all hover:scale-[1.02] cursor-pointer"
-                >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24">
-                    <path
-                      fill="#EA4335"
-                      d="M12 5c1.5 0 2.9.5 4 1.5l3-3C17.2 1.8 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.4 9 5 12 5z"
-                    />
-                    <path
-                      fill="#4285F4"
-                      d="M23.5 12.3c0-.8-.1-1.7-.2-2.3H12v4.6h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.9z"
-                    />
-                    <path
-                      fill="#FBBC05"
-                      d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.8s.2-2.1.4-2.8L1.9 6.3C.7 8.7 0 10.3 0 12s.7 3.3 1.9 5.7l3.7-2.9z"
-                    />
-                    <path
-                      fill="#34A853"
-                      d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2-6.4-4.8L1.9 16.4C3.7 20.1 7.5 23 12 23z"
-                    />
-                  </svg>
-                  <span>Google Sign In</span>
-                </button>
-
-                <button
-                  type="button"
-                  id="btn-auth-apple"
-                  onClick={() => handleRealOAuthAttempt('apple')}
-                  className="py-2.5 px-3 rounded-xl border bg-slate-800/90 hover:bg-slate-700 dark:bg-slate-800/90 dark:hover:bg-slate-700 light:bg-slate-100 light:hover:bg-slate-200 border-slate-700 dark:border-slate-700 light:border-slate-300 text-white dark:text-white light:text-slate-900 text-xs font-semibold flex items-center justify-center gap-2 transition-all hover:scale-[1.02] cursor-pointer"
-                >
-                  <svg className="w-4 h-4 fill-current" viewBox="0 0 170 170">
-                    <path d="M150.37 130.25c-2.45 5.66-5.35 10.87-8.71 15.66-4.58 6.53-8.33 11.05-11.22 13.56-4.48 4.12-9.28 6.23-14.42 6.35-3.69 0-8.14-1.05-13.32-3.18-5.19-2.12-9.97-3.17-14.34-3.17-4.58 0-9.49 1.05-14.75 3.17-5.26 2.13-9.5 3.24-12.74 3.35-4.35.13-9.16-1.9-14.42-6.08-3.7-3.04-7.6-7.71-11.71-14.01-6.19-9.56-11.07-20.9-14.65-34.02-3.58-13.11-5.37-25.29-5.37-36.54 0-14.99 3.82-27.17 11.45-36.54 7.63-9.37 17.06-14.16 28.3-14.36 4.79 0 10.37 1.25 16.74 3.75 6.37 2.5 10.33 3.8 11.89 3.9 1.9-.3 6.13-1.74 12.7-4.33 6.57-2.58 12.22-3.78 16.94-3.6 12.49.6 22.84 5.3 31.06 14.1-10.9 6.6-16.2 15.7-15.9 27.3.3 9.1 3.8 16.7 10.5 22.8 6.7 6.1 14.6 9.6 23.7 10.5-2.2 6.6-5.1 13.5-8.7 20.7zM119.22 33.15c0-7.39 2.65-14.28 7.95-20.67 5.3-6.39 11.9-10.48 19.8-12.28.3 1.2.5 2.5.5 3.9 0 7.39-2.75 14.28-8.25 20.67-5.5 6.39-12.15 10.48-19.95 12.28-.1-1.3-.05-2.6-.05-3.9z" />
-                  </svg>
-                  <span>Apple Sign In</span>
-                </button>
-              </div>
-
-              {/* Truthful OAuth Configuration Notice when unconfigured */}
-              {configNotice && (
-                <div className="p-3.5 bg-amber-950/70 border border-amber-600/60 rounded-xl space-y-1.5 text-xs text-amber-200">
-                  <div className="flex items-center gap-1.5 font-bold text-amber-300">
-                    <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
-                    <span>Configuration Notice ({configNotice.provider === 'google' ? 'Google' : 'Apple'})</span>
-                  </div>
-                  <p className="text-[11px] leading-relaxed text-amber-200/90">{configNotice.message}</p>
-                </div>
-              )}
-
-              {/* Email Form Switcher */}
-              <div className="flex items-center gap-3">
-                <div className="h-px flex-1 bg-slate-800 dark:bg-slate-800 light:bg-slate-200" />
-                <span className="text-[11px] text-slate-500 font-medium">or continue with email</span>
-                <div className="h-px flex-1 bg-slate-800 dark:bg-slate-800 light:bg-slate-200" />
-              </div>
-
               {/* STEP 1: Registration or Login Form */}
               {registerStep === 'form' ? (
-                <>
+                <div className="space-y-3">
                   {/* Mode Toggle: Register vs Login */}
                   <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
                     <button
@@ -797,178 +764,179 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     </button>
                   </div>
 
-                  <form noValidate onSubmit={handleEmailAuthSubmit} className="space-y-3">
-                    {authMode === 'register' && (
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="block text-[11px] font-semibold text-slate-400 dark:text-slate-400 light:text-slate-600">
-                            AniVault Display Username
-                          </label>
-                          {usernameStatus === 'checking' && (
-                            <span className="text-[10px] text-amber-400 flex items-center gap-1 font-medium">
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              <span>Checking database...</span>
-                            </span>
-                          )}
-                          {usernameStatus === 'available' && (
-                            <span className="text-[10px] text-emerald-400 flex items-center gap-1 font-semibold">
-                              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                              <span>Username available</span>
-                            </span>
-                          )}
-                          {(usernameStatus === 'unavailable' || usernameStatus === 'invalid') && (
-                            <span className="text-[10px] text-rose-400 flex items-center gap-1 font-semibold">
-                              <AlertCircle className="w-3 h-3 text-rose-400" />
-                              <span>{usernameMessage || 'Unavailable'}</span>
-                            </span>
-                          )}
-                        </div>
-                        <div className="relative">
-                          <User className="w-4 h-4 text-slate-500 absolute left-3 top-3 pointer-events-none" />
-                          <input
-                            type="text"
-                            id="input-auth-name"
-                            value={chosenUsername}
-                            onChange={e => {
-                              setChosenUsername(e.target.value);
-                              setAuthError(null);
-                            }}
-                            placeholder="e.g. AnimeExplorer"
-                            className={`w-full pl-9 pr-9 py-2 rounded-xl bg-slate-950/70 dark:bg-slate-950/70 light:bg-slate-100 border text-xs text-white dark:text-white light:text-slate-900 placeholder-slate-500 focus:outline-none transition-colors ${
-                              usernameStatus === 'available'
-                                ? 'border-emerald-500/70 focus:border-emerald-500'
-                                : usernameStatus === 'unavailable' || usernameStatus === 'invalid'
-                                ? 'border-rose-500/80 focus:border-rose-500'
-                                : 'border-slate-700/80 dark:border-slate-700/80 light:border-slate-300 focus:border-rose-500'
-                            }`}
-                            required
-                          />
-                          <div className="absolute right-3 top-2.5 pointer-events-none">
+                    {/* EMAIL FORM */}
+                    <form noValidate onSubmit={handleEmailAuthSubmit} className="space-y-3">
+                      {authMode === 'register' && (
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="block text-[11px] font-semibold text-slate-400 dark:text-slate-400 light:text-slate-600">
+                              AniVault Display Username
+                            </label>
                             {usernameStatus === 'checking' && (
-                              <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+                              <span className="text-[10px] text-amber-400 flex items-center gap-1 font-medium">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                <span>Checking database...</span>
+                              </span>
                             )}
                             {usernameStatus === 'available' && (
-                              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                              <span className="text-[10px] text-emerald-400 flex items-center gap-1 font-semibold">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                <span>Username available</span>
+                              </span>
                             )}
                             {(usernameStatus === 'unavailable' || usernameStatus === 'invalid') && (
-                              <AlertCircle className="w-4 h-4 text-rose-400" />
+                              <span className="text-[10px] text-rose-400 flex items-center gap-1 font-semibold">
+                                <AlertCircle className="w-3 h-3 text-rose-400" />
+                                <span>{usernameMessage || 'Unavailable'}</span>
+                              </span>
                             )}
                           </div>
+                          <div className="relative">
+                            <User className="w-4 h-4 text-slate-500 absolute left-3 top-3 pointer-events-none" />
+                            <input
+                              type="text"
+                              id="input-auth-name"
+                              value={chosenUsername}
+                              onChange={e => {
+                                setChosenUsername(e.target.value);
+                                setAuthError(null);
+                              }}
+                              placeholder="e.g. AnimeExplorer"
+                              className={`w-full pl-9 pr-9 py-2 rounded-xl bg-slate-950/70 dark:bg-slate-950/70 light:bg-slate-100 border text-xs text-white dark:text-white light:text-slate-900 placeholder-slate-500 focus:outline-none transition-colors ${
+                                usernameStatus === 'available'
+                                  ? 'border-emerald-500/70 focus:border-emerald-500'
+                                  : usernameStatus === 'unavailable' || usernameStatus === 'invalid'
+                                  ? 'border-rose-500/80 focus:border-rose-500'
+                                  : 'border-slate-700/80 dark:border-slate-700/80 light:border-slate-300 focus:border-rose-500'
+                              }`}
+                              required
+                            />
+                            <div className="absolute right-3 top-2.5 pointer-events-none">
+                              {usernameStatus === 'checking' && (
+                                <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+                              )}
+                              {usernameStatus === 'available' && (
+                                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                              )}
+                              {(usernameStatus === 'unavailable' || usernameStatus === 'invalid') && (
+                                <AlertCircle className="w-4 h-4 text-rose-400" />
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-400 dark:text-slate-400 light:text-slate-600 mb-1">
+                          Email Address
+                        </label>
+                        <div className="relative">
+                          <Mail className="w-4 h-4 text-slate-500 absolute left-3 top-3 pointer-events-none" />
+                          <input
+                            type="email"
+                            id="input-auth-email"
+                            value={emailInput}
+                            onChange={e => {
+                              setEmailInput(e.target.value);
+                              setAuthError(null);
+                            }}
+                            placeholder="you@example.com"
+                            className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950/70 dark:bg-slate-950/70 light:bg-slate-100 border border-slate-700/80 dark:border-slate-700/80 light:border-slate-300 text-xs text-white dark:text-white light:text-slate-900 placeholder-slate-500 focus:outline-none focus:border-rose-500 transition-colors"
+                            required
+                          />
                         </div>
                       </div>
-                    )}
 
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-400 dark:text-slate-400 light:text-slate-600 mb-1">
-                        Email Address
-                      </label>
-                      <div className="relative">
-                        <Mail className="w-4 h-4 text-slate-500 absolute left-3 top-3 pointer-events-none" />
-                        <input
-                          type="email"
-                          id="input-auth-email"
-                          value={emailInput}
-                          onChange={e => {
-                            setEmailInput(e.target.value);
-                            setAuthError(null);
-                          }}
-                          placeholder="you@example.com"
-                          className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950/70 dark:bg-slate-950/70 light:bg-slate-100 border border-slate-700/80 dark:border-slate-700/80 light:border-slate-300 text-xs text-white dark:text-white light:text-slate-900 placeholder-slate-500 focus:outline-none focus:border-rose-500 transition-colors"
-                          required
-                        />
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-400 dark:text-slate-400 light:text-slate-600 mb-1">
+                          Password (min 8 characters)
+                        </label>
+                        <div className="relative">
+                          <Lock className="w-4 h-4 text-slate-500 absolute left-3 top-3 pointer-events-none" />
+                          <input
+                            type={showPassword ? "text" : "password"}
+                            id="input-auth-password"
+                            value={passwordInput}
+                            onChange={e => {
+                              setPasswordInput(e.target.value);
+                              setAuthError(null);
+                            }}
+                            minLength={8}
+                            placeholder="••••••••••••"
+                            className="w-full pl-9 pr-10 py-2 rounded-xl bg-slate-950/70 dark:bg-slate-950/70 light:bg-slate-100 border border-slate-700/80 dark:border-slate-700/80 light:border-slate-300 text-xs text-white dark:text-white light:text-slate-900 placeholder-slate-500 focus:outline-none focus:border-rose-500 transition-colors"
+                            required
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPassword(p => !p)}
+                            className="absolute right-3 top-2.5 p-0.5 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                            aria-label={showPassword ? "Hide password" : "Show password"}
+                          >
+                            {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
                       </div>
-                    </div>
 
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-400 dark:text-slate-400 light:text-slate-600 mb-1">
-                        Password (min 8 characters)
-                      </label>
-                      <div className="relative">
-                        <Lock className="w-4 h-4 text-slate-500 absolute left-3 top-3 pointer-events-none" />
-                        <input
-                          type={showPassword ? "text" : "password"}
-                          id="input-auth-password"
-                          value={passwordInput}
-                          onChange={e => {
-                            setPasswordInput(e.target.value);
-                            setAuthError(null);
-                          }}
-                          minLength={8}
-                          placeholder="••••••••••••"
-                          className="w-full pl-9 pr-10 py-2 rounded-xl bg-slate-950/70 dark:bg-slate-950/70 light:bg-slate-100 border border-slate-700/80 dark:border-slate-700/80 light:border-slate-300 text-xs text-white dark:text-white light:text-slate-900 placeholder-slate-500 focus:outline-none focus:border-rose-500 transition-colors"
-                          required
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowPassword(p => !p)}
-                          className="absolute right-3 top-2.5 p-0.5 text-slate-400 hover:text-white transition-colors cursor-pointer"
-                          aria-label={showPassword ? "Hide password" : "Show password"}
-                        >
-                          {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                      </div>
-                    </div>
-
-                    {authMode === 'register' && (
-                      <p className="text-[11px] text-slate-400 dark:text-slate-400 light:text-slate-600 leading-normal">
-                        Remember these details — you’ll need them later to sign in.
-                      </p>
-                    )}
-
-                    {authError && (
-                      <div className="p-2.5 rounded-lg bg-rose-950/80 border border-rose-800 text-[11px] text-rose-300 flex items-start gap-1.5">
-                        <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                        <span className="leading-relaxed">{authError}</span>
-                      </div>
-                    )}
-
-                    {authSuccess && (
-                      <div className="p-2.5 rounded-lg bg-emerald-950/80 border border-emerald-800 text-[11px] text-emerald-300 flex items-start gap-1.5">
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                        <span className="leading-relaxed">{authSuccess}</span>
-                      </div>
-                    )}
-
-                    <button
-                      type="submit"
-                      id="btn-auth-submit"
-                      disabled={loading || (authMode === 'register' && usernameStatus !== 'available')}
-                      className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white shadow-md shadow-rose-600/30 flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {loading ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <>
-                          <span>
-                            {authMode === 'register'
-                              ? usernameStatus === 'checking'
-                                ? 'Checking Username...'
-                                : usernameStatus === 'unavailable'
-                                ? 'Username Unavailable'
-                                : usernameStatus === 'invalid'
-                                ? 'Enter Valid Username'
-                                : 'Send Verification Code'
-                              : 'Sign In to Account'}
-                          </span>
-                          <ArrowRight className="w-3.5 h-3.5" />
-                        </>
+                      {authMode === 'register' && (
+                        <p className="text-[11px] text-slate-400 dark:text-slate-400 light:text-slate-600 leading-normal">
+                          Remember these details — you’ll need them later to sign in.
+                        </p>
                       )}
-                    </button>
 
-                    {loading && authMode === 'register' && (
-                      <p className="text-[11px] text-center text-slate-400 dark:text-slate-400 light:text-slate-500 animate-pulse pt-1">
-                        It may take some time. Please be patient.
-                      </p>
-                    )}
-                  </form>
-                </>
+                      {authError && (
+                        <div className="p-2.5 rounded-lg bg-rose-950/80 border border-rose-800 text-[11px] text-rose-300 flex items-start gap-1.5">
+                          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                          <span className="leading-relaxed">{authError}</span>
+                        </div>
+                      )}
+
+                      {authSuccess && (
+                        <div className="p-2.5 rounded-lg bg-emerald-950/80 border border-emerald-800 text-[11px] text-emerald-300 flex items-start gap-1.5">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                          <span className="leading-relaxed">{authSuccess}</span>
+                        </div>
+                      )}
+
+                      <button
+                        type="submit"
+                        id="btn-auth-submit"
+                        disabled={loading || (authMode === 'register' && usernameStatus !== 'available')}
+                        className="w-full py-2.5 px-4 rounded-xl font-bold text-xs bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white shadow-md shadow-rose-600/30 flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {loading ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <>
+                            <span>
+                              {authMode === 'register'
+                                ? usernameStatus === 'checking'
+                                  ? 'Checking Username...'
+                                  : usernameStatus === 'unavailable'
+                                  ? 'Username Unavailable'
+                                  : usernameStatus === 'invalid'
+                                  ? 'Enter Valid Username'
+                                  : 'Send Verification Code'
+                                : 'Sign In to Account'}
+                            </span>
+                            <ArrowRight className="w-3.5 h-3.5" />
+                          </>
+                        )}
+                      </button>
+
+                      {loading && authMode === 'register' && (
+                        <p className="text-[11px] text-center text-slate-400 animate-pulse pt-1">
+                          It may take some time. Please be patient.
+                        </p>
+                      )}
+                    </form>
+                </div>
               ) : (
                 /* STEP 2: Real Email Verification Code Form */
                 <form noValidate onSubmit={handleVerifyCodeSubmit} className="space-y-4 animate-fade-in">
                   <div className="p-3.5 bg-slate-950/90 dark:bg-slate-950/90 light:bg-slate-100 border border-slate-800 dark:border-slate-800 light:border-slate-300 rounded-xl space-y-1.5 text-center">
                     <div className="font-bold text-sm text-white dark:text-white light:text-slate-900 flex items-center justify-center gap-1.5">
                       <KeyRound className="w-4 h-4 text-rose-500" />
-                      <span>Verify your email</span>
+                      <span>Verify your account</span>
                     </div>
                     <p className="text-slate-400 dark:text-slate-400 light:text-slate-600 text-xs">
                       We sent a verification code to:
@@ -985,43 +953,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     <label className="block text-xs font-semibold text-slate-300 dark:text-slate-300 light:text-slate-700 text-center">
                       Enter 6-digit code
                     </label>
-                    <div className="relative flex justify-center items-center py-2">
-                      <div className="flex gap-2 justify-center">
-                        {[0, 1, 2, 3, 4, 5].map(idx => {
-                          const char = verificationCode[idx] || '';
-                          const isCurrent = verificationCode.length === idx;
-                          return (
-                            <div
-                              key={idx}
-                              className={`w-10 h-11 sm:w-11 sm:h-12 rounded-xl border flex items-center justify-center text-lg font-mono font-black transition-all ${
-                                char
-                                  ? 'border-rose-500 bg-rose-950/40 text-rose-300 shadow-sm'
-                                  : isCurrent
-                                  ? 'border-slate-400 bg-slate-900 text-white animate-pulse'
-                                  : 'border-slate-800 bg-slate-950 text-slate-600'
-                              }`}
-                            >
-                              {char || '_'}
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        autoComplete="one-time-code"
-                        maxLength={6}
-                        value={verificationCode}
-                        onChange={e => {
-                          const val = e.target.value.replace(/\D/g, '').slice(0, 6);
-                          setVerificationCode(val);
-                          setAuthError(null);
-                        }}
-                        autoFocus
-                        className="absolute inset-0 opacity-0 cursor-text w-full h-full"
-                        aria-label="6-digit verification code"
-                      />
-                    </div>
+                    <OtpInput
+                      value={verificationCode}
+                      onChange={val => {
+                        setVerificationCode(val);
+                        setAuthError(null);
+                      }}
+                      disabled={loading}
+                      autoFocus
+                      idPrefix="register-otp"
+                    />
                   </div>
 
                   {authError && (
@@ -1053,18 +994,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     )}
                   </button>
 
-                  <div className="pt-2 border-t border-slate-800/80 text-center space-y-1.5">
-                    <p className="text-xs text-slate-400 dark:text-slate-400 light:text-slate-600">Didn't receive the code?</p>
-                    <button
-                      type="button"
-                      onClick={handleResendRegisterCode}
-                      disabled={resendCooldown > 0 || loading}
-                      className="text-xs font-semibold text-rose-400 hover:text-rose-300 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer transition-colors"
-                    >
-                      {resendCooldown > 0 ? `Resend Code (${resendCooldown}s)` : 'Resend Code'}
-                    </button>
+                  <div className="pt-2 border-t border-slate-800/80 text-center space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-400">Didn't receive the code?</span>
+                      <button
+                        type="button"
+                        onClick={handleResendRegisterCode}
+                        disabled={resendCooldown > 0 || loading}
+                        className="font-semibold text-rose-400 hover:text-rose-300 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                      >
+                        {resendCooldown > 0 ? `Resend Code (${resendCooldown}s)` : 'Resend Code'}
+                      </button>
+                    </div>
+
                     {loading && (
-                      <p className="text-[11px] text-center text-slate-400 dark:text-slate-400 light:text-slate-500 animate-pulse">
+                      <p className="text-[11px] text-center text-slate-400 animate-pulse">
                         It may take some time. Please be patient.
                       </p>
                     )}
@@ -1094,28 +1038,63 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     <span>Saved Accounts on This Device</span>
                   </div>
                   <div className="space-y-1">
-                    {savedAccounts.map(acc => (
-                      <div
-                        key={acc.id}
-                        onClick={() => handleSwitchToSaved(acc)}
-                        className="p-2 rounded-lg bg-slate-950/60 dark:bg-slate-950/60 light:bg-slate-50 hover:bg-slate-800 dark:hover:bg-slate-800 light:hover:bg-slate-100 border border-slate-800/80 dark:border-slate-800/80 light:border-slate-200 cursor-pointer flex items-center justify-between text-xs transition-colors"
-                      >
-                        <div className="flex items-center gap-2">
-                          <div className="w-6 h-6 rounded-full bg-rose-500/20 text-rose-400 text-[10px] font-bold flex items-center justify-center">
-                            {(acc.username || acc.name).charAt(0).toUpperCase()}
-                          </div>
-                          <div>
-                            <span className="font-bold text-white dark:text-white light:text-slate-900">
-                              {acc.username || acc.name}
+                    {savedAccounts.map(acc => {
+                      const isOwner = acc.role === 'owner';
+                      if (isOwner) {
+                        return (
+                          <div
+                            key={acc.id}
+                            onClick={() => handleSwitchToSaved(acc)}
+                            className="p-2.5 rounded-xl bg-black border-2 border-amber-500/70 hover:border-amber-400 shadow-md shadow-amber-950/40 cursor-pointer flex items-center justify-between text-xs transition-all"
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-amber-500 to-yellow-400 text-slate-950 text-[11px] font-black flex items-center justify-center shrink-0 border border-amber-300 shadow-sm">
+                                <Shield className="w-3.5 h-3.5 text-slate-950" />
+                              </div>
+                              <div className="space-y-0.5 min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="font-black text-white tracking-tight truncate">
+                                    {acc.username || acc.name || 'Owner'}
+                                  </span>
+                                  <span className="text-[10px] font-mono font-bold text-amber-400 border border-amber-400/60 bg-amber-500/15 px-1.5 py-0.2 rounded">
+                                    &#123;owner&#125;
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-amber-300 font-semibold">Owner</div>
+                                <div className="text-[10px] text-amber-200/70 font-mono truncate">
+                                  {acc.email || 'makerapp688@gmail.com'}
+                                </div>
+                              </div>
+                            </div>
+                            <span className="text-[10px] text-amber-300 font-bold px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-400/40 shrink-0">
+                              Switch
                             </span>
-                            <span className="text-[10px] text-slate-400 ml-1.5">
-                              ({acc.email || acc.provider})
-                            </span>
                           </div>
+                        );
+                      }
+                      return (
+                        <div
+                          key={acc.id}
+                          onClick={() => handleSwitchToSaved(acc)}
+                          className="p-2 rounded-lg bg-slate-950/60 dark:bg-slate-950/60 light:bg-slate-50 hover:bg-slate-800 dark:hover:bg-slate-800 light:hover:bg-slate-100 border border-slate-800/80 dark:border-slate-800/80 light:border-slate-200 cursor-pointer flex items-center justify-between text-xs transition-colors"
+                        >
+                          <div className="flex items-center gap-2">
+                            <div className="w-6 h-6 rounded-full bg-rose-500/20 text-rose-400 text-[10px] font-bold flex items-center justify-center">
+                              {(acc.username || acc.name).charAt(0).toUpperCase()}
+                            </div>
+                            <div>
+                              <span className="font-bold text-white dark:text-white light:text-slate-900">
+                                {acc.username || acc.name}
+                              </span>
+                              <span className="text-[10px] text-slate-400 ml-1.5">
+                                ({acc.email || acc.provider})
+                              </span>
+                            </div>
+                          </div>
+                          <span className="text-[10px] text-rose-400 font-semibold">Switch</span>
                         </div>
-                        <span className="text-[10px] text-rose-400 font-semibold">Switch</span>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}

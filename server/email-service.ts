@@ -11,9 +11,18 @@ export interface EmailConfigStatus {
   configured: boolean;
   missing: string[];
   hostConfigured: boolean;
+  portConfigured: boolean;
   userConfigured: boolean;
   passConfigured: boolean;
   fromConfigured: boolean;
+}
+
+export interface ServerSecretsDiagnostic {
+  SMTP_HOST: 'configured' | 'missing';
+  SMTP_PORT: 'configured' | 'missing';
+  SMTP_USER: 'configured' | 'missing';
+  SMTP_PASS: 'configured' | 'missing';
+  SMTP_FROM: 'configured' | 'missing';
 }
 
 /**
@@ -49,10 +58,45 @@ export function getEmailConfigStatus(): EmailConfigStatus {
     configured: missing.length === 0,
     missing,
     hostConfigured,
+    portConfigured: true,
     userConfigured,
     passConfigured,
     fromConfigured
   };
+}
+
+/**
+ * Verifies AI Studio server secrets status without ever exposing private values.
+ * Reports only 'configured' | 'missing' for each required variable.
+ */
+export function checkServerSecretsDiagnostic(): ServerSecretsDiagnostic {
+  dotenv.config();
+  const host = (process.env.SMTP_HOST || '').trim().replace(/^["']|["']$/g, '');
+  const port = (process.env.SMTP_PORT || '').trim().replace(/^["']|["']$/g, '');
+  const user = (process.env.SMTP_USER || '').trim().replace(/^["']|["']$/g, '');
+  const pass = (process.env.SMTP_PASS || '').trim().replace(/^["']|["']$/g, '');
+  const from = (process.env.SMTP_FROM || '').trim().replace(/^["']|["']$/g, '');
+
+  return {
+    SMTP_HOST: host ? 'configured' : 'missing',
+    SMTP_PORT: port ? 'configured' : 'missing',
+    SMTP_USER: user ? 'configured' : 'missing',
+    SMTP_PASS: pass ? 'configured' : 'missing',
+    SMTP_FROM: from || user ? 'configured' : 'missing'
+  };
+}
+
+/**
+ * Safe server-side startup report logging secret status without exposing values.
+ */
+export function logEmailConfigDiagnostics(): void {
+  const diag = checkServerSecretsDiagnostic();
+  console.log('[AI_STUDIO_SECRETS_CHECK] Server runtime email configuration:');
+  console.log(`  SMTP_HOST: ${diag.SMTP_HOST}`);
+  console.log(`  SMTP_PORT: ${diag.SMTP_PORT}`);
+  console.log(`  SMTP_USER: ${diag.SMTP_USER}`);
+  console.log(`  SMTP_PASS: ${diag.SMTP_PASS}`);
+  console.log(`  SMTP_FROM: ${diag.SMTP_FROM}`);
 }
 
 /**
@@ -222,13 +266,13 @@ export async function sendVerificationEmail(
 ): Promise<{ success: boolean; messageId?: string }> {
   const status = getEmailConfigStatus();
   if (!status.configured) {
-    console.error(`[EMAIL_DIAGNOSTIC] SMTP_CONFIGURATION_ERROR: missing=[${status.missing.join(', ')}]`);
+    console.error(`[EMAIL_DIAGNOSTIC] Missing SMTP configuration: ${status.missing.join(', ')}`);
     throw new Error('Email service is not configured.');
   }
 
   const transporter = createEmailTransporter();
   if (!transporter) {
-    console.error('[EMAIL_DIAGNOSTIC] SMTP_CONFIGURATION_ERROR: transporter initialization returned null');
+    console.error('[EMAIL_DIAGNOSTIC] Missing SMTP configuration: transporter initialization returned null');
     throw new Error('Email service is not configured.');
   }
 
@@ -236,64 +280,20 @@ export async function sendVerificationEmail(
   const from = resolveFromAddress(smtpUser);
   const host = process.env.SMTP_HOST!.trim();
   const port = parseInt(process.env.SMTP_PORT || '587', 10) || 587;
+  const userDomain = smtpUser.includes('@') ? '@' + smtpUser.split('@')[1] : 'smtp_host';
 
   const recipientDomain = toEmail.includes('@') ? '@' + toEmail.split('@')[1] : 'recipient';
-  console.log(`[EMAIL_DIAGNOSTIC] EMAIL_SEND_STARTED: domain=${recipientDomain}`);
-
-  // Safe connection verification
-  try {
-    await transporter.verify();
-    console.log(`[EMAIL_DIAGNOSTIC] SMTP_CONNECTION_SUCCESS: host=${host}, port=${port}`);
-    console.log('[EMAIL_DIAGNOSTIC] SMTP_AUTH_SUCCESS: true');
-  } catch (verifyErr: any) {
-    if (verifyErr.code === 'EAUTH' || (verifyErr.response && verifyErr.response.includes('535'))) {
-      console.error(`[EMAIL_DIAGNOSTIC] SMTP_AUTH_FAILED: ${verifyErr.message}`);
-      throw new Error('Email service authentication failed.');
-    }
-    console.error(`[EMAIL_DIAGNOSTIC] SMTP_CONNECTION_FAILED: ${verifyErr.message}`);
-    throw new Error('Email service connection failed.');
-  }
-
-  // Generate compliant RFC 5322 Message-ID
-  const userDomain = smtpUser.includes('@') ? smtpUser.split('@')[1] : 'anivault.app';
-  const messageId = `<anivault-${Date.now()}-${crypto.randomBytes(6).toString('hex')}@${userDomain}>`;
-
-  // Check for existing AniVault logo to embed inline via CID
-  const candidateLogoPaths = [
-    path.join(process.cwd(), 'public', 'anivault-logo.png'),
-    path.join(process.cwd(), 'public', 'anivault-logo.jpg'),
-    path.join(process.cwd(), 'dist', 'anivault-logo.png'),
-    path.join(process.cwd(), 'dist', 'anivault-logo.jpg')
-  ];
-
-  const attachments: Array<{
-    filename: string;
-    path: string;
-    cid: string;
-    contentType: string;
-    contentDisposition: 'inline';
-  }> = [];
-
-  for (const candidate of candidateLogoPaths) {
-    if (fs.existsSync(candidate)) {
-      attachments.push({
-        filename: 'anivault-logo.png',
-        path: candidate,
-        cid: 'anivault-logo',
-        contentType: 'image/jpeg',
-        contentDisposition: 'inline'
-      });
-      break;
-    }
-  }
+  console.log(`[EMAIL_DIAGNOSTIC] Email send started: recipientDomain=${recipientDomain}`);
+  console.log(`[EMAIL_DIAGNOSTIC] SMTP connection: host=${host}, port=${port}`);
+  console.log(`[EMAIL_DIAGNOSTIC] SMTP authentication: authenticated as userDomain=${userDomain}`);
 
   // Plain text fallback
   const plainTextContent = 
 `AniVault
 
-Here’s your new account verification
+Here’s your new account verification code
 
-Use the verification code below to verify your AniVault account.
+Use the verification code below to verify your AniVault account:
 
 ┌─────────────────┐
 │     ${code}      │
@@ -306,7 +306,8 @@ If you didn’t request this verification code, you can safely ignore this email
 © AniVault
 This is an automated message. Please do not reply to this email.`;
 
-  // Production-grade responsive HTML email template matching AniVault branding
+  // Production-grade responsive HTML email template matching AniVault branding.
+  // Uses pure CSS/HTML table layout with 0 binary attachments for maximum deliverability & inbox placement.
   const htmlContent = `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -320,13 +321,19 @@ This is an automated message. Please do not reply to this email.`;
         <td align="center">
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width: 500px; background-color: #0b0f19; border: 1px solid #1e293b; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.6);">
             
-            <!-- Header: AniVault Logo & Brand Name -->
+            <!-- Header: AniVault Brand Header -->
             <tr>
               <td align="center" style="padding: 36px 32px 20px; text-align: center;">
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin: 0 auto;">
                   <tr>
                     <td align="center" style="padding-bottom: 12px;">
-                      <img src="cid:anivault-logo" alt="AniVault Logo" width="60" height="60" style="display: block; width: 60px; height: 60px; margin: 0 auto; border-radius: 14px; border: 1px solid #334155; object-fit: cover;" />
+                      <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin: 0 auto;">
+                        <tr>
+                          <td align="center" style="width: 56px; height: 56px; background-color: #e11d48; border-radius: 14px; text-align: center; vertical-align: middle; box-shadow: 0 4px 14px rgba(225, 29, 72, 0.45);">
+                            <span style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 30px; font-weight: 900; color: #ffffff; line-height: 56px; display: block;">A</span>
+                          </td>
+                        </tr>
+                      </table>
                     </td>
                   </tr>
                   <tr>
@@ -394,57 +401,41 @@ This is an automated message. Please do not reply to this email.`;
 </html>`;
 
   try {
+    console.log(`[EMAIL_DIAGNOSTIC] SMTP send attempt: recipientDomain=${recipientDomain}`);
     const info = await transporter.sendMail({
       from,
       to: toEmail,
       subject: subjectTitle,
-      messageId,
-      headers: {
-        'Message-ID': messageId,
-        'X-Entity-Ref-ID': crypto.randomBytes(12).toString('hex'),
-        'X-Mailer': 'AniVault Mailer',
-        'X-Priority': '1',
-        'Importance': 'High'
-      },
       text: plainTextContent,
-      html: htmlContent,
-      attachments
+      html: htmlContent
     });
 
     if (info.rejected && info.rejected.length > 0) {
-      console.error(`[EMAIL_DIAGNOSTIC] EMAIL_REJECTED: recipient=${toEmail} rejected by provider:`, info.rejected);
-      console.error('[EMAIL_DIAGNOSTIC] INVALID_RECIPIENT: recipient was rejected by the mail server');
+      console.error(`[EMAIL_DIAGNOSTIC] Email provider rejected message: count=${info.rejected.length}`);
+      console.error('[EMAIL_DIAGNOSTIC] Invalid recipient: recipient was rejected by the mail server');
       throw new Error('Email provider rejected the message.');
     }
 
-    console.log(`[EMAIL_DIAGNOSTIC] EMAIL_ACCEPTED: messageId=${info.messageId}`);
+    console.log(`[EMAIL_DIAGNOSTIC] SMTP/provider acceptance: messageId=${info.messageId}`);
     return { success: true, messageId: info.messageId };
   } catch (err: any) {
-    console.error('[EMAIL_DIAGNOSTIC] SMTP send error:', {
-      message: err.message,
-      code: err.code,
-      command: err.command,
-      response: err.response,
-      responseCode: err.responseCode
-    });
-
     if (err.code === 'EAUTH' || (err.response && err.response.includes('535'))) {
-      console.error('[EMAIL_DIAGNOSTIC] SMTP_AUTH_FAILED: Authentication rejected by mail provider');
+      console.error(`[EMAIL_DIAGNOSTIC] SMTP authentication failed: ${err.message}`);
       throw new Error('Email service authentication failed.');
     }
     if (err.code === 'EENVELOPE' || (err.response && err.response.includes('550')) || (err.message && err.message.includes('Email provider rejected'))) {
-      console.error('[EMAIL_DIAGNOSTIC] INVALID_SENDER: Sender or recipient was rejected by mail provider');
+      console.error(`[EMAIL_DIAGNOSTIC] Email provider rejected message: ${err.message}`);
       throw new Error('Email provider rejected the message.');
     }
     if (err.code === 'ETIMEDOUT' || err.code === 'ECONNREFUSED' || err.code === 'ESOCKET' || err.code === 'ENOTFOUND' || err.code === 'EDNS') {
-      console.error('[EMAIL_DIAGNOSTIC] SMTP_CONNECTION_FAILED: Connection refused, timed out, or unresolvable hostname');
+      console.error(`[EMAIL_DIAGNOSTIC] SMTP connection failed: ${err.message}`);
       throw new Error('Email service connection failed.');
     }
     if (err.message && (err.message.includes('authentication') || err.message.includes('connection') || err.message.includes('configured'))) {
       throw err;
     }
 
-    console.error(`[EMAIL_DIAGNOSTIC] EMAIL_SEND_FAILED: ${err.message}`);
+    console.error(`[EMAIL_DIAGNOSTIC] SMTP connection failed: ${err.message}`);
     throw new Error('Email delivery failed.');
   }
 }

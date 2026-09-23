@@ -22,7 +22,15 @@ import {
   Activity,
   Lock,
   Sparkles,
-  Info
+  Info,
+  Camera,
+  UserPlus,
+  LogIn,
+  AlertTriangle,
+  ShieldAlert,
+  Bug,
+  MessageSquare,
+  Download
 } from 'lucide-react';
 import { useUserData } from '../hooks/useUserData.ts';
 import {
@@ -31,12 +39,21 @@ import {
   logoutToGuest,
   logoutFromServer,
   clearHistory,
-  setSessionAccount
+  setSessionAccount,
+  getSavedAccounts,
+  switchActiveAccount,
+  getAccountAvatar
 } from '../utils/userStorage.ts';
 import { ThemeMode } from '../types.ts';
 import { AniVaultLogo } from './AniVaultLogo.tsx';
 import { OwnerLoginModal } from './OwnerLoginModal.tsx';
 import { OwnerDashboardModal } from './OwnerDashboardModal.tsx';
+import { AccountSwitcherModal } from './AccountSwitcherModal.tsx';
+import { ProfilePhotoModal } from './ProfilePhotoModal.tsx';
+import { AuthModal } from './AuthModal.tsx';
+import { DeleteAccountModal } from './DeleteAccountModal.tsx';
+import { BugReportModal } from './BugReportModal.tsx';
+import { OwnerBugReportsModal } from './OwnerBugReportsModal.tsx';
 
 interface AccountViewProps {
   onOpenAuthModal: () => void;
@@ -48,14 +65,58 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
   const [usernameInput, setUsernameInput] = useState(account.username || 'AnimeExplorer');
   const [saveSuccess, setSaveSuccess] = useState(false);
 
+  // Account Switcher State
+  const [isAccountSwitcherOpen, setIsAccountSwitcherOpen] = useState(false);
+
+  // Profile Photo Modal State
+  const [isProfilePhotoModalOpen, setIsProfilePhotoModalOpen] = useState(false);
+
+  // Auth Modal State for Make New Account / Log In
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('register');
+  const [authModalView, setAuthModalView] = useState<'overview' | 'email'>('overview');
+
+  // Delete Account Modal State
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+
   // Owner System State
   const [ownerSession, setOwnerSession] = useState<{ authenticated: boolean; owner?: { email: string; username: string; role: string } } | null>(null);
   const [isOwnerLoginOpen, setIsOwnerLoginOpen] = useState(false);
   const [isOwnerDashboardOpen, setIsOwnerDashboardOpen] = useState(false);
 
+  // Bug Report System State
+  const [isBugReportOpen, setIsBugReportOpen] = useState(false);
+  const [isOwnerBugReportsOpen, setIsOwnerBugReportsOpen] = useState(false);
+  const [newBugCount, setNewBugCount] = useState<number>(0);
+
+  const isOwner = account.role === 'owner' || account.id === 'usr_owner' || Boolean(ownerSession?.authenticated);
+  const ownerUsername = account.role === 'owner' ? account.username : ownerSession?.owner?.username || 'Owner';
+  const currentAvatarUrl = isOwner ? getAccountAvatar('usr_owner') : (isGuest || account.id === 'guest_user' ? null : getAccountAvatar(account.id));
+
   useEffect(() => {
     checkOwnerSession();
   }, []);
+
+  useEffect(() => {
+    if (isOwner) {
+      fetchNewBugCount();
+    }
+  }, [isOwner]);
+
+  const fetchNewBugCount = async () => {
+    try {
+      const token = localStorage.getItem('anivault_owner_session_token') || '';
+      const res = await fetch('/api/bug-reports/owner/list', {
+        headers: { 'X-Owner-Session': token }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setNewBugCount(data.newCount || 0);
+      }
+    } catch (err) {
+      // quiet catch
+    }
+  };
 
   const checkOwnerSession = async () => {
     try {
@@ -136,9 +197,6 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
     setThemeMode(mode);
   };
 
-  const isOwner = ownerSession?.authenticated && ownerSession?.owner?.role === 'owner';
-  const ownerUsername = ownerSession?.owner?.username;
-
   return (
     <div
       className="w-full max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 pb-36 md:pb-24 space-y-6 sm:space-y-8"
@@ -162,14 +220,50 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
       <div className="bg-slate-950/80 dark:bg-slate-950/80 light:bg-white border border-slate-800 dark:border-slate-800 light:border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xl space-y-6 transition-colors">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-4">
+            {/* Clickable Profile Photo with Camera Badge */}
             <div
-              className={`w-14 h-14 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center text-white text-2xl font-black shadow-lg shrink-0 ${
-                isOwner
-                  ? 'bg-gradient-to-tr from-amber-600 to-yellow-500 shadow-amber-600/30 text-slate-950'
-                  : 'bg-gradient-to-tr from-rose-600 to-pink-500 shadow-rose-600/30'
-              }`}
+              onClick={() => setIsProfilePhotoModalOpen(true)}
+              className="relative group cursor-pointer shrink-0"
+              title="Change Profile Photo"
+              id="btn-change-profile-photo"
             >
-              {isOwner ? (ownerUsername || 'O').charAt(0).toUpperCase() : (account.username || account.name || 'A').charAt(0).toUpperCase()}
+              {currentAvatarUrl ? (
+                <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-full overflow-hidden shadow-lg border border-slate-700 bg-transparent shrink-0">
+                  <img
+                    src={currentAvatarUrl}
+                    alt={isOwner ? (ownerUsername || 'Owner') : (account.username || 'User')}
+                    className="w-full h-full rounded-full object-cover"
+                  />
+                </div>
+              ) : (
+                <div
+                  className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full flex items-center justify-center text-white text-2xl font-black shadow-lg shrink-0 ${
+                    isOwner
+                      ? 'bg-gradient-to-tr from-amber-600 to-yellow-500 shadow-amber-600/30 text-slate-950 border border-amber-400'
+                      : 'bg-gradient-to-tr from-rose-600 to-pink-500 shadow-rose-600/30'
+                  }`}
+                >
+                  {isOwner ? (
+                    <Shield className="w-8 h-8 text-slate-950" />
+                  ) : (
+                    (account.username || account.name || 'A').charAt(0).toUpperCase()
+                  )}
+                </div>
+              )}
+
+              {/* Camera Hover Overlay */}
+              <div className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                <Camera className="w-5 h-5" />
+              </div>
+              <div
+                className={`absolute -bottom-1 -right-1 p-1 rounded-full shadow-md border ${
+                  isOwner
+                    ? 'bg-amber-500 text-slate-950 border-amber-300'
+                    : 'bg-rose-600 text-white border-rose-400'
+                }`}
+              >
+                <Camera className="w-3 h-3" />
+              </div>
             </div>
 
             <div className="space-y-1">
@@ -235,6 +329,17 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
           </div>
 
           <div className="flex items-center gap-2 flex-wrap pt-2 sm:pt-0">
+            {/* Switch Account Trigger */}
+            <button
+              type="button"
+              id="btn-switch-account-header"
+              onClick={() => setIsAccountSwitcherOpen(true)}
+              className="px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-900/90 hover:bg-slate-800 text-slate-200 hover:text-white border border-slate-700/60 shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <Users className="w-3.5 h-3.5 text-rose-500" />
+              <span>Switch Account</span>
+            </button>
+
             {!isOwner && (
               <button
                 type="button"
@@ -380,6 +485,31 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
               </div>
             </button>
 
+            {/* Owner Bug Reports Section */}
+            <button
+              type="button"
+              id="btn-owner-bug-reports"
+              onClick={() => setIsOwnerBugReportsOpen(true)}
+              className="p-4 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-amber-500/50 hover:border-amber-400 text-left transition-all group cursor-pointer shadow-sm relative overflow-hidden"
+            >
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-lg bg-rose-500/20 text-rose-400 border border-rose-500/30 group-hover:scale-110 transition-transform">
+                  <Bug className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-white flex items-center gap-2">
+                    <span>Bug Reports</span>
+                    {newBugCount > 0 && (
+                      <span className="px-1.5 py-0.5 rounded-full text-[10px] font-black bg-rose-600 text-white animate-pulse">
+                        {newBugCount} new
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-400">User feedback &amp; attachments</div>
+                </div>
+              </div>
+            </button>
+
             <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 text-left flex items-center gap-3 opacity-90">
               <div className="p-2.5 rounded-lg bg-rose-500/10 text-rose-400">
                 <Database className="w-5 h-5" />
@@ -458,6 +588,62 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
                 <div className="text-xs font-bold text-white">Audit Logs</div>
                 <div className="text-[11px] text-slate-400">Telemetry &amp; access trail</div>
               </div>
+            </div>
+          </div>
+
+          {/* Normal Account Access for Owner (Requirement 7 & 8) */}
+          <div className="p-4 sm:p-5 rounded-2xl bg-slate-900/90 border border-amber-500/40 space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-rose-500/10 text-rose-400">
+                  <Users className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-white">
+                    Create Account / Log In
+                  </h4>
+                  <p className="text-[11px] text-slate-400">
+                    Manage access to AniVault user accounts on this device
+                  </p>
+                </div>
+              </div>
+              <span className="text-[10px] text-amber-400/90 font-mono px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/30">
+                Max 3 accounts total
+              </span>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Open registration or login for user accounts. Accounts can be freely created and verified. Note: The Owner role is permanently restricted to the verified system owner; additional owners cannot be created.
+            </p>
+
+            <div className="flex items-center gap-3 pt-1">
+              <button
+                type="button"
+                id="btn-owner-create-normal-account"
+                onClick={() => {
+                  setAuthModalMode('register');
+                  setAuthModalView('email');
+                  setShowAuthModal(true);
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-md shadow-rose-600/20 flex items-center gap-1.5 transition-all cursor-pointer border border-rose-500/40"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>Create Account</span>
+              </button>
+
+              <button
+                type="button"
+                id="btn-owner-login-normal-account"
+                onClick={() => {
+                  setAuthModalMode('login');
+                  setAuthModalView('email');
+                  setShowAuthModal(true);
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-all cursor-pointer"
+              >
+                <LogIn className="w-3.5 h-3.5 text-rose-400" />
+                <span>Log In</span>
+              </button>
             </div>
           </div>
         </div>
@@ -588,39 +774,85 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
               </p>
             </div>
 
-            <button
-              type="button"
-              id="btn-owner-logout-bottom"
-              onClick={handleOwnerLogout}
-              className="w-full sm:w-auto px-5 py-2.5 rounded-xl text-xs font-bold bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 hover:border-rose-700 shadow-md shadow-rose-950/40 transition-all flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <LogOut className="w-4 h-4 text-rose-400" />
-              <span>Owner Logout</span>
-            </button>
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <button
+                type="button"
+                id="btn-owner-switch-bottom"
+                onClick={() => setIsAccountSwitcherOpen(true)}
+                className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-500/40 shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Users className="w-3.5 h-3.5 text-amber-400" />
+                <span>Switch Account</span>
+              </button>
+              <button
+                type="button"
+                id="btn-owner-logout-bottom"
+                onClick={handleOwnerLogout}
+                className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl text-xs font-bold bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 hover:border-rose-700 shadow-md shadow-rose-950/40 transition-all flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <LogOut className="w-4 h-4 text-rose-400" />
+                <span>Owner Logout</span>
+              </button>
+            </div>
           </div>
         ) : !isGuest ? (
-          <div className="p-4 sm:p-5 rounded-2xl bg-slate-950/90 dark:bg-slate-950/90 light:bg-white border border-slate-800 dark:border-slate-800 light:border-slate-200 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div className="space-y-1">
-              <div className="text-xs font-bold text-white dark:text-white light:text-slate-900 flex items-center gap-2">
-                <User className="w-4 h-4 text-rose-500" />
-                <span>Signed in as {account.username || account.name}</span>
+          <div className="space-y-3">
+            <div className="p-4 sm:p-5 rounded-2xl bg-slate-950/90 dark:bg-slate-950/90 light:bg-white border border-slate-800 dark:border-slate-800 light:border-slate-200 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="text-xs font-bold text-white dark:text-white light:text-slate-900 flex items-center gap-2">
+                  <User className="w-4 h-4 text-rose-500" />
+                  <span>Signed in as {account.username || account.name}</span>
+                </div>
+                <p className="text-[11px] text-slate-400 dark:text-slate-400 light:text-slate-600">
+                  Signing out keeps your library saved to your account while switching this device to guest mode.
+                </p>
               </div>
-              <p className="text-[11px] text-slate-400 dark:text-slate-400 light:text-slate-600">
-                Signing out keeps your library saved to your account while switching this device to guest mode.
-              </p>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  type="button"
+                  id="btn-switch-account-bottom"
+                  onClick={() => setIsAccountSwitcherOpen(true)}
+                  className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700/60 shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Users className="w-3.5 h-3.5 text-rose-500" />
+                  <span>Switch Account</span>
+                </button>
+                <button
+                  type="button"
+                  id="btn-user-logout-bottom"
+                  onClick={async () => {
+                    await logoutFromServer();
+                  }}
+                  className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 dark:bg-slate-900 dark:hover:bg-slate-800 light:bg-slate-100 light:hover:bg-slate-200 text-rose-400 border border-slate-800 dark:border-slate-800 light:border-slate-300 hover:border-rose-500/40 shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <LogOut className="w-4 h-4 text-rose-500" />
+                  <span>Log Out</span>
+                </button>
+              </div>
             </div>
 
-            <button
-              type="button"
-              id="btn-user-logout-bottom"
-              onClick={async () => {
-                await logoutFromServer();
-              }}
-              className="w-full sm:w-auto px-5 py-2.5 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 dark:bg-slate-900 dark:hover:bg-slate-800 light:bg-slate-100 light:hover:bg-slate-200 text-rose-400 border border-slate-800 dark:border-slate-800 light:border-slate-300 hover:border-rose-500/40 shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <LogOut className="w-4 h-4 text-rose-500" />
-              <span>Log Out</span>
-            </button>
+            {/* Danger Zone: Delete Account */}
+            <div className="p-4 rounded-2xl bg-rose-950/20 border border-rose-900/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-0.5">
+                <div className="text-xs font-bold text-rose-300 flex items-center gap-1.5">
+                  <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Delete Account</span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  Permanently erase this account, favorites, and watch history with email verification.
+                </p>
+              </div>
+              <button
+                type="button"
+                id="btn-delete-account"
+                onClick={() => setIsDeleteModalOpen(true)}
+                className="px-3.5 py-2 rounded-xl text-xs font-bold bg-rose-950/60 hover:bg-rose-900/80 text-rose-300 border border-rose-800/80 hover:border-rose-700 transition-all flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                <span>Delete Account</span>
+              </button>
+            </div>
           </div>
         ) : (
           <div className="p-4 sm:p-5 rounded-2xl bg-slate-950/90 dark:bg-slate-950/90 light:bg-white border border-slate-800 dark:border-slate-800 light:border-slate-200 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -634,18 +866,147 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
               </p>
             </div>
 
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <button
+                type="button"
+                id="btn-guest-switch-bottom"
+                onClick={() => setIsAccountSwitcherOpen(true)}
+                className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700/60 shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Users className="w-3.5 h-3.5 text-rose-500" />
+                <span>Switch Account</span>
+              </button>
+              <button
+                type="button"
+                id="btn-guest-connect-bottom"
+                onClick={onOpenAuthModal}
+                className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-md shadow-rose-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <User className="w-4 h-4" />
+                <span>Sign In / Connect</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Public Report a Bug / Feedback Card */}
+        <div className="p-4 sm:p-5 rounded-2xl bg-slate-950/90 border border-slate-800 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="text-xs font-bold text-white flex items-center gap-2">
+              <Bug className="w-4 h-4 text-rose-500" />
+              <span>Report a Bug / Provide Feedback</span>
+            </div>
+            <p className="text-[11px] text-slate-400">
+              Found an issue, missing episode link, or artwork problem? Let us know!
+            </p>
+          </div>
+
+          <button
+            type="button"
+            id="btn-open-bug-report"
+            onClick={() => setIsBugReportOpen(true)}
+            className="px-4 py-2.5 rounded-xl text-xs font-bold bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/40 shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer shrink-0"
+          >
+            <Bug className="w-4 h-4" />
+            <span>Report a Bug</span>
+          </button>
+        </div>
+
+        {/* Download App Source Code Card - Owner Account Only */}
+        {isOwner && (
+          <div className="p-4 sm:p-5 rounded-2xl bg-slate-950/90 border border-emerald-500/30 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="text-xs font-bold text-white flex items-center gap-2">
+                <Download className="w-4 h-4 text-emerald-400" />
+                <span>Download App Source Code Archive (.tar.gz)</span>
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-extrabold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  OWNER ONLY
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Download the complete AniVault project codebase to test or run locally.
+              </p>
+            </div>
+
             <button
               type="button"
-              id="btn-guest-connect-bottom"
-              onClick={onOpenAuthModal}
-              className="w-full sm:w-auto px-5 py-2.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-md shadow-rose-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer"
+              onClick={async () => {
+                try {
+                  const ownerToken = localStorage.getItem('anivault_owner_session_token');
+                  const headers: Record<string, string> = {};
+                  if (ownerToken) {
+                    headers['Authorization'] = `Bearer ${ownerToken}`;
+                    headers['x-anivault-owner-session'] = ownerToken;
+                  }
+                  const res = await fetch('/api/download-source', { headers });
+                  if (!res.ok) {
+                    const err = await res.json().catch(() => ({ error: 'Download failed' }));
+                    alert(err.error || 'Failed to download source archive.');
+                    return;
+                  }
+                  const blob = await res.blob();
+                  const url = window.URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = 'anivault-source-code.tar.gz';
+                  document.body.appendChild(a);
+                  a.click();
+                  window.URL.revokeObjectURL(url);
+                  document.body.removeChild(a);
+                } catch {
+                  alert('An error occurred while downloading source code.');
+                }
+              }}
+              className="px-4 py-2.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer shrink-0"
             >
-              <User className="w-4 h-4" />
-              <span>Sign In / Connect</span>
+              <Download className="w-4 h-4" />
+              <span>Download Source Code</span>
             </button>
           </div>
         )}
       </div>
+
+      {/* Bug Report Modal for Users & Guests */}
+      <BugReportModal
+        isOpen={isBugReportOpen}
+        onClose={() => setIsBugReportOpen(false)}
+        activeFeature="Account & Settings"
+      />
+
+      {/* Owner Bug Reports Dashboard */}
+      {isOwner && (
+        <OwnerBugReportsModal
+          isOpen={isOwnerBugReportsOpen}
+          onClose={() => {
+            setIsOwnerBugReportsOpen(false);
+            fetchNewBugCount();
+          }}
+          sessionToken={localStorage.getItem('anivault_owner_session_token') || undefined}
+        />
+      )}
+
+      {/* Account Switcher Modal */}
+      <AccountSwitcherModal
+        isOpen={isAccountSwitcherOpen}
+        onClose={() => setIsAccountSwitcherOpen(false)}
+        currentAccountId={account.id}
+        isOwnerActive={Boolean(isOwner)}
+        onOpenMakeAccount={() => {
+          setAuthModalMode('register');
+          setAuthModalView('email');
+          setShowAuthModal(true);
+        }}
+        onOpenLoginAccount={() => {
+          setAuthModalMode('login');
+          setAuthModalView('email');
+          setShowAuthModal(true);
+        }}
+        onOpenOwnerLogin={() => setIsOwnerLoginOpen(true)}
+        onAccountSwitched={(switchedAcc) => {
+          checkOwnerSession();
+          setUsernameInput(switchedAcc.username || 'AnimeExplorer');
+        }}
+      />
 
       {/* Owner Login Modal */}
       <OwnerLoginModal
@@ -672,6 +1033,52 @@ export const AccountView: React.FC<AccountViewProps> = ({ onOpenAuthModal }) => 
         isOpen={isOwnerDashboardOpen}
         onClose={() => setIsOwnerDashboardOpen(false)}
         onLogout={handleOwnerLogout}
+        onOpenCreateAccount={() => {
+          setAuthModalMode('register');
+          setAuthModalView('email');
+          setShowAuthModal(true);
+        }}
+        onOpenLoginAccount={() => {
+          setAuthModalMode('login');
+          setAuthModalView('email');
+          setShowAuthModal(true);
+        }}
+        onOpenProfilePhoto={() => setIsProfilePhotoModalOpen(true)}
+      />
+
+      {/* Profile Photo Modal (Normal Users + Owner) */}
+      <ProfilePhotoModal
+        isOpen={isProfilePhotoModalOpen}
+        onClose={() => setIsProfilePhotoModalOpen(false)}
+        accountId={isOwner ? 'usr_owner' : account.id}
+        username={isOwner ? (ownerUsername || 'Owner') : (account.username || 'AnimeExplorer')}
+        isOwner={Boolean(isOwner)}
+        currentAvatar={currentAvatarUrl}
+        onAvatarUpdated={() => {
+          checkOwnerSession();
+        }}
+      />
+
+      {/* Delete Account Modal (with email OTP verification) */}
+      <DeleteAccountModal
+        isOpen={isDeleteModalOpen}
+        onClose={() => setIsDeleteModalOpen(false)}
+        account={account}
+        onAccountDeleted={() => {
+          setIsDeleteModalOpen(false);
+          checkOwnerSession();
+        }}
+      />
+
+      {/* Auth Modal for programmatic Make New Account / Log In */}
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        initialMode={authModalMode}
+        initialView={authModalView}
+        onAccountChanged={() => {
+          checkOwnerSession();
+        }}
       />
     </div>
   );

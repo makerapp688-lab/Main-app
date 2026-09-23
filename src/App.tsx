@@ -16,7 +16,8 @@ import {
   Check,
   Layers,
   ArrowRight,
-  X
+  X,
+  Bug
 } from 'lucide-react';
 import { Anime, CatalogueStats } from './types.ts';
 import { Navbar, NavTabType } from './components/Navbar.tsx';
@@ -27,6 +28,7 @@ import { StatsModal } from './components/StatsModal.tsx';
 import { MobileBottomNav } from './components/MobileBottomNav.tsx';
 import { SurpriseMeModal } from './components/SurpriseMeModal.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
+import { BugReportModal } from './components/BugReportModal.tsx';
 import { AnimeArtwork } from './components/AnimeArtwork.tsx';
 import { CompareAnimeView } from './components/CompareAnimeView.tsx';
 import { AccountView } from './components/AccountView.tsx';
@@ -60,6 +62,7 @@ export function App() {
   const [isStatsOpen, setIsStatsOpen] = useState<boolean>(false);
   const [isSurpriseOpen, setIsSurpriseOpen] = useState<boolean>(false);
   const [isAuthOpen, setIsAuthOpen] = useState<boolean>(false);
+  const [isGlobalBugReportOpen, setIsGlobalBugReportOpen] = useState<boolean>(false);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<NavTabType>('browse');
   const [myListSubTab, setMyListSubTab] = useState<'favorites' | 'watchlist'>('favorites');
@@ -359,7 +362,19 @@ export function App() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-5 space-y-6">
         {/* Only show Hero & Featured Banner when in default Browse tab without a query */}
         {activeTab === 'browse' && !searchQuery && selectedGenre === 'All' && selectedType === 'All' && selectedAudioFilter === 'all' && selectedStatusFilter === 'all' && (
-          <div className="space-y-6">
+          <div className="space-y-4">
+            {/* Subtle Home Screen Bug Report Notice */}
+            <div className="flex items-center justify-between px-3.5 py-2 rounded-xl bg-slate-900/40 dark:bg-slate-900/40 light:bg-slate-100/80 border border-slate-800/60 dark:border-slate-800/60 light:border-slate-200 text-xs">
+              <button
+                type="button"
+                onClick={() => setIsGlobalBugReportOpen(true)}
+                className="text-slate-400 hover:text-slate-200 dark:hover:text-slate-200 light:hover:text-slate-900 transition-colors cursor-pointer inline-flex items-center gap-1.5 text-xs font-medium"
+              >
+                <Bug className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                <span>Please report any bug in Settings if you find one.</span>
+              </button>
+            </div>
+
             {/* Hero Welcome Bar (Matching Screenshot 1 & 2) */}
             <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-900 via-rose-950/40 to-slate-900 dark:from-slate-900 dark:via-rose-950/40 dark:to-slate-900 light:from-white light:via-rose-50 light:to-white border border-slate-800/80 dark:border-slate-800/80 light:border-slate-200 p-5 md:p-6 shadow-xl">
               <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 relative z-10">
@@ -754,16 +769,24 @@ export function App() {
               <span>Anime Discovery &amp; Metadata Engine</span>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 Active Provider: RareToon India ({RARETOON_PROVIDER_NAME})
               </span>
+              <button
+                type="button"
+                onClick={() => setIsGlobalBugReportOpen(true)}
+                className="text-rose-400 hover:text-rose-300 flex items-center gap-1 transition-colors font-medium cursor-pointer"
+              >
+                <Bug className="w-3.5 h-3.5" />
+                <span>Report a Bug</span>
+              </button>
               <a
                 href={RARETOON_BASE_URL}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-rose-400 hover:text-rose-300 flex items-center gap-1 transition-colors font-medium"
+                className="text-slate-400 hover:text-slate-300 flex items-center gap-1 transition-colors font-medium"
               >
                 <span>Visit Source Site</span>
                 <ExternalLink className="w-3 h-3" />
@@ -780,6 +803,13 @@ export function App() {
           </div>
         </div>
       </footer>
+
+      {/* Global Bug Report Modal */}
+      <BugReportModal
+        isOpen={isGlobalBugReportOpen}
+        onClose={() => setIsGlobalBugReportOpen(false)}
+        activeFeature={activeTab}
+      />
 
       {/* Anime Details Modal */}
       {selectedAnime && (

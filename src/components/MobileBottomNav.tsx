@@ -1,6 +1,7 @@
 import React from 'react';
-import { Home, Bookmark, Scale, User } from 'lucide-react';
+import { Home, Bookmark, Scale, User, Shield } from 'lucide-react';
 import { useUserData } from '../hooks/useUserData.ts';
+import { getAccountAvatar } from '../utils/userStorage.ts';
 import { NavTabType } from './Navbar.tsx';
 
 interface MobileBottomNavProps {
@@ -81,9 +82,26 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
               : 'text-slate-400 hover:text-slate-200 dark:text-slate-400 light:text-slate-600'
           }`}
         >
-          <User className="w-5 h-5" />
+          {(() => {
+            const isOwner = account.role === 'owner';
+            const isGuestUser = isGuest || account.id === 'guest_user' || account.provider === 'guest';
+            const avatarUrl = isOwner ? getAccountAvatar('usr_owner') : (!isGuestUser ? getAccountAvatar(account.id) : null);
+            return avatarUrl ? (
+              <img
+                src={avatarUrl}
+                alt="DP"
+                className={`w-5 h-5 rounded-full object-cover ${
+                  isOwner ? 'border border-amber-400 ring-1 ring-amber-500/40' : 'border border-white/50'
+                }`}
+              />
+            ) : isOwner ? (
+              <Shield className="w-5 h-5 text-amber-400" />
+            ) : (
+              <User className="w-5 h-5" />
+            );
+          })()}
           <span className="text-[10px] mt-0.5 max-w-[50px] truncate">
-            {account.username || (isGuest ? 'Guest' : 'Account')}
+            {account.role === 'owner' ? 'Owner' : account.username || (isGuest ? 'Guest' : 'Account')}
           </span>
         </button>
       </div>

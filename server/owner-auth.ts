@@ -6,7 +6,8 @@ import {
   getEmailConfigStatus,
   generateVerificationCode,
   sendVerificationEmail,
-  testEmailTransport
+  testEmailTransport,
+  checkServerSecretsDiagnostic
 } from './email-service.js';
 
 // Data file paths
@@ -83,6 +84,7 @@ export function getOwnerAccount(): OwnerAccount | null {
       const parsed = JSON.parse(data);
       if (parsed && parsed.email) {
         if (!parsed.id) parsed.id = 'usr_owner';
+        parsed.email = parsed.email.trim().toLowerCase();
         return parsed;
       }
     }
@@ -95,6 +97,9 @@ export function getOwnerAccount(): OwnerAccount | null {
 export function saveOwnerAccount(account: OwnerAccount): void {
   if (!account.id) {
     account.id = 'usr_owner';
+  }
+  if (account.email) {
+    account.email = account.email.trim().toLowerCase();
   }
   fs.writeFileSync(OWNER_ACCOUNT_PATH, JSON.stringify(account, null, 2), 'utf-8');
 }
@@ -109,7 +114,7 @@ export function validateOwnerSession(sessionId: string): { id: string; email: st
       if (decoded && decoded.role === 'owner') {
         session = {
           sessionId,
-          email: decoded.email,
+          email: decoded.email.trim().toLowerCase(),
           username: decoded.username,
           role: 'owner',
           createdAt: decoded.expiresAt - 30 * 24 * 60 * 60 * 1000,
@@ -121,16 +126,26 @@ export function validateOwnerSession(sessionId: string): { id: string; email: st
         return null;
       }
     }
+
     let owner = getOwnerAccount();
-    if (!owner || owner.email !== session.email || owner.role !== 'owner') {
-      // Recreate owner account if missing (self-healing)
-      if (session && session.email) {
+    const sessionEmail = session.email ? session.email.trim().toLowerCase() : '';
+
+    if (!owner || owner.email.trim().toLowerCase() !== sessionEmail || owner.role !== 'owner') {
+      // If owner exists but password Hash exists, DO NOT destroy owner!
+      if (owner && owner.passwordHash && owner.passwordHash.length > 0) {
+        if (owner.email.trim().toLowerCase() === sessionEmail) {
+          // Email matches, keep existing owner!
+        } else {
+          return null;
+        }
+      } else if (!owner && sessionEmail) {
+        // Only recreate placeholder if owner file is completely missing
         const nowStr = new Date().toISOString();
         const placeholderOwner: OwnerAccount = {
           id: 'usr_owner',
-          email: session.email,
+          email: sessionEmail,
           username: session.username || 'VaultMaster',
-          passwordHash: '', // placeholder
+          passwordHash: '',
           salt: '',
           createdAt: nowStr,
           updatedAt: nowStr,
@@ -142,6 +157,7 @@ export function validateOwnerSession(sessionId: string): { id: string; email: st
         return null;
       }
     }
+
     return {
       id: owner.id || 'usr_owner',
       email: owner.email,
@@ -251,21 +267,16 @@ function parseCookies(req: Request): Record<string, string> {
 
 function setSessionCookie(res: Response, name: string, value: string, maxAgeSeconds: number, req?: Request): void {
   const isSecure = req ? (req.secure || req.headers['x-forwarded-proto'] === 'https') : true;
-  const expiresString = maxAgeSeconds <= 0 
-    ? 'Thu, 01 Jan 1970 00:00:00 GMT' 
-    : new Date(Date.now() + maxAgeSeconds * 1000).toUTCString();
+  const maxAge = Math.max(0, Math.floor(maxAgeSeconds));
+  const expiresString = new Date(Date.now() + maxAge * 1000).toUTCString();
+  const cookieValue = value || '';
 
-  if (isSecure) {
-    res.setHeader(
-      'Set-Cookie',
-      `${name}=${value}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${maxAgeSeconds}; Expires=${expiresString}; Partitioned`
-    );
-  } else {
-    res.setHeader(
-      'Set-Cookie',
-      `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}; Expires=${expiresString}`
-    );
-  }
+  const secureFlags = isSecure ? '; Secure' : '';
+
+  res.setHeader(
+    'Set-Cookie',
+    `${name}=${cookieValue}; Path=/; HttpOnly; SameSite=Lax${secureFlags}; Max-Age=${maxAge}; Expires=${expiresString}`
+  );
 }
 
 const SESSION_SECRET = process.env.SESSION_SECRET || 'anivault_super_secure_session_secret_2026';
@@ -347,7 +358,12 @@ export function authenticateSession(req: Request, res: Response, next: NextFunct
   }
 
   const owner = getOwnerAccount();
-  if (!owner || owner.email !== session.email || owner.role !== 'owner') {
+  if (
+    !owner ||
+    owner.role !== 'owner' ||
+    owner.email.trim().toLowerCase() !== session.email.trim().toLowerCase() ||
+    owner.email.trim().toLowerCase() !== 'makerapp688@gmail.com'
+  ) {
     activeSessions.delete(sessionId);
     saveSessions();
     (req as any).ownerSession = null;
@@ -373,7 +389,7 @@ export function requireOwner(req: Request, res: Response, next: NextFunction): v
   }
 
   const owner = getOwnerAccount();
-  if (!owner || owner.email !== session.email) {
+  if (!owner || owner.email.trim().toLowerCase() !== session.email.trim().toLowerCase()) {
     res.status(403).json({ error: 'Forbidden: Owner account mismatch.' });
     return;
   }
@@ -388,13 +404,16 @@ export function createOwnerRouter(): express.Router {
   // 0a. Owner-Only Email Service Configuration Status (No secret values returned)
   router.get('/email-status', (req: Request, res: Response) => {
     const status = getEmailConfigStatus();
+    const secretsDiag = checkServerSecretsDiagnostic();
     res.json({
       configured: status.configured,
       missing: status.missing,
       hostConfigured: status.hostConfigured,
       userConfigured: status.userConfigured,
       passConfigured: status.passConfigured,
-      fromConfigured: status.fromConfigured
+      fromConfigured: status.fromConfigured,
+      diagnostic: secretsDiag,
+      ...secretsDiag
     });
   });
 
@@ -441,6 +460,17 @@ export function createOwnerRouter(): express.Router {
         return;
       }
 
+      // Check strictly authorized owner email
+      const AUTHORIZED_OWNER_EMAIL = 'makerapp688@gmail.com';
+      if (normalizedEmail !== AUTHORIZED_OWNER_EMAIL) {
+        saveTempSetup(null);
+        res.status(403).json({
+          error: 'Not authorized for Owner account.',
+          code: 'NOT_AUTHORIZED_OWNER'
+        });
+        return;
+      }
+
       // 3. Password validation
       if (!password || typeof password !== 'string' || password.length < 8) {
         res.status(400).json({ error: 'Password must be at least 8 characters long.' });
@@ -450,17 +480,12 @@ export function createOwnerRouter(): express.Router {
       const existingOwner = getOwnerAccount();
 
       if (existingOwner) {
-        if (existingOwner.email !== normalizedEmail) {
-          saveTempSetup(null);
-          res.status(403).json({
-            error: 'Permanent AniVault Owner account already exists. A different email cannot be registered as Owner.',
-            code: 'OWNER_ALREADY_EXISTS'
-          });
-          return;
-        } else {
-          res.status(400).json({ error: 'AniVault Owner account is already set up for this email. Please log in.' });
-          return;
-        }
+        saveTempSetup(null);
+        res.status(403).json({
+          error: 'Permanent AniVault Owner account already exists. Setup rejected.',
+          code: 'OWNER_ALREADY_EXISTS'
+        });
+        return;
       }
 
       // Check email service configuration status
@@ -574,6 +599,12 @@ export function createOwnerRouter(): express.Router {
           return;
         }
         res.status(400).json({ error: 'Incorrect verification code.' });
+        return;
+      }
+
+      if (temp.email !== 'makerapp688@gmail.com') {
+        saveTempSetup(null);
+        res.status(403).json({ error: 'Not authorized for Owner account.' });
         return;
       }
 
@@ -780,25 +811,23 @@ export function createOwnerRouter(): express.Router {
   // 5. Get Session Status
   router.get('/session', authenticateSession, (req: Request, res: Response) => {
     const session = (req as any).ownerSession;
-    const ownerExists = getOwnerAccount() !== null;
     const owner = getOwnerAccount();
-
-    if (!session) {
-      res.json({
-        authenticated: false,
-        ownerExists
-      });
-      return;
-    }
+    const ownerExists = Boolean(owner && owner.email && owner.email.trim().toLowerCase() === 'makerapp688@gmail.com');
+    const isAuthorized = Boolean(
+      session &&
+      session.email &&
+      session.email.trim().toLowerCase() === 'makerapp688@gmail.com' &&
+      ownerExists
+    );
 
     res.json({
-      authenticated: true,
-      ownerExists: true,
-      owner: {
-        email: session.email,
-        username: owner?.username || session.username || 'Owner',
-        role: session.role
-      }
+      authenticated: isAuthorized,
+      ownerExists: ownerExists,
+      owner: isAuthorized && owner ? {
+        email: owner.email,
+        username: owner.username,
+        role: 'owner'
+      } : null
     });
   });
 
@@ -931,6 +960,44 @@ export function createOwnerRouter(): express.Router {
       console.error('[OwnerEmailChangeVerify Error]', err);
       res.status(500).json({ error: err.message || 'Internal server error during email change verification.' });
     }
+  });
+
+  // 9. Seamless switch to permanent Owner account
+  router.post('/switch', (req: Request, res: Response) => {
+    const owner = getOwnerAccount();
+    if (!owner) {
+      res.status(404).json({ error: 'Owner account does not exist. Please setup Owner first.' });
+      return;
+    }
+
+    const sessionExpires = Date.now() + 30 * 24 * 60 * 60 * 1000;
+    const sessionId = generateSignedSessionToken('usr_owner', owner.email, owner.username, 'owner', 'email', sessionExpires);
+    const sessionData: SessionData = {
+      sessionId,
+      email: owner.email,
+      username: owner.username,
+      role: 'owner',
+      createdAt: Date.now(),
+      expiresAt: sessionExpires
+    };
+
+    activeSessions.set(sessionId, sessionData);
+    saveSessions();
+
+    setSessionCookie(res, 'anivault_owner_session', sessionId, 2592000, req);
+
+    res.json({
+      success: true,
+      message: 'Switched to Owner account successfully.',
+      owner: {
+        id: 'usr_owner',
+        email: owner.email,
+        username: owner.username,
+        role: 'owner',
+        createdAt: owner.createdAt
+      },
+      sessionToken: sessionId
+    });
   });
 
   return router;

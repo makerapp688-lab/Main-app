@@ -4,15 +4,21 @@ import path from 'path';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { runIngestion } from './server/raretoon-ingest.js';
-import { createOwnerRouter } from './server/owner-auth.js';
+import { createOwnerRouter, authenticateSession } from './server/owner-auth.js';
 import { createUserAuthRouter } from './server/user-auth.js';
+import { logEmailConfigDiagnostics } from './server/email-service.js';
+
+import { createBugReportsRouter } from './server/bug-reports.js';
 
 const app = express();
 app.set('trust proxy', 1);
 const PORT = 3000;
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Safe server-side check of email configuration secrets (values never displayed)
+logEmailConfigDiagnostics();
+
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
 // Mount AniVault User & Provider Authentication
 const userAuthRouter = createUserAuthRouter();
@@ -21,6 +27,10 @@ app.use('/auth', userAuthRouter);
 
 // Mount AniVault Owner System Backend Foundation
 app.use('/api/owner', createOwnerRouter());
+
+// Mount AniVault Bug Reporting System
+const bugReportsRouter = createBugReportsRouter();
+app.use('/api/bug-reports', bugReportsRouter);
 
 // In-memory cache for catalogue
 let catalogueCache: any[] = [];
@@ -58,6 +68,23 @@ app.get('/api/health', (req, res) => {
     activeProvider: 'RareToon India (RareAnimes)',
     providerUrl: 'https://www.rareanimes.mov/home/'
   });
+});
+
+app.get('/api/download-source', authenticateSession, (req, res) => {
+  const session = (req as any).ownerSession;
+  if (!session || session.role !== 'owner' || session.email?.trim().toLowerCase() !== 'makerapp688@gmail.com') {
+    res.status(403).json({ error: 'Access denied. The source code download feature is reserved strictly for the verified Owner account.' });
+    return;
+  }
+
+  const archivePath = path.join(process.cwd(), 'public', 'anivault-source.tar.gz');
+  if (!fs.existsSync(archivePath)) {
+    res.status(404).json({ error: 'Project archive not found.' });
+    return;
+  }
+  res.setHeader('Content-Type', 'application/gzip');
+  res.setHeader('Content-Disposition', 'attachment; filename="anivault-source-code.tar.gz"');
+  fs.createReadStream(archivePath).pipe(res);
 });
 
 app.get('/api/stats', (req, res) => {
